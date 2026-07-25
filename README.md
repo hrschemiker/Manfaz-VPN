@@ -85,5 +85,5 @@ Manfaz VPN is under active development. Protocol behavior can vary across provid
 ---
 
 <div align="center">
-  Made with &lt;3 by <a href="https://github.com/hrschemiker"><strong>Hamidreza</strong></a>
+  Made with ♥ by <a href="https://github.com/hrschemiker"><strong>Hamidreza</strong></a>
 </div>

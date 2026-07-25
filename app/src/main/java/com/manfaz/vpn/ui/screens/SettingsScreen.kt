@@ -250,7 +250,7 @@ fun SettingsScreen(onOpenPerApp: () -> Unit, onOpenDiagnostics: () -> Unit) {
                 horizontalArrangement = Arrangement.Center,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("Made with <3 by ", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+                Text("Made with ♥ by ", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
                 Text(
                     "Hamidreza",
                     color = MaterialTheme.colorScheme.primary,
