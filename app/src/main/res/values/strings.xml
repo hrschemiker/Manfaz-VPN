@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Default (English fallback) -->
+    <string name="app_name">Manfaz VPN</string>
+    <string name="tab_home">Home</string>
+    <string name="tab_servers">Servers</string>
+    <string name="tab_import">Import</string>
+    <string name="tab_settings">Settings</string>
+    <string name="status_disconnected">Disconnected</string>
+    <string name="status_connecting">Connecting</string>
+    <string name="status_connected">Connected</string>
+    <string name="status_failed">Connection failed</string>
+    <string name="connect">Connect</string>
+    <string name="disconnect">Disconnect</string>
+    <string name="shortcut_connect">اتصال سریع</string>
+    <string name="shortcut_disconnect">قطع اتصال</string>
+</resources>

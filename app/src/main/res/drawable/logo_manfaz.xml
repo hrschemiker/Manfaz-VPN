@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="200dp"
+    android:height="200dp"
+    android:viewportWidth="200"
+    android:viewportHeight="200">
+    <!-- Circle background -->
+    <path android:pathData="M100,4 a96,96 0 1,0 0.1,0 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient android:type="radial" android:centerX="100" android:centerY="85"
+                android:gradientRadius="140" android:startColor="#FF8A2B" android:endColor="#E64A00" />
+        </aapt:attr>
+    </path>
+    <!-- Orbit ring -->
+    <path android:pathData="M40,120 C60,150 140,150 160,120"
+        android:strokeColor="#FFD54A" android:strokeWidth="5" android:fillColor="#00000000"
+        android:strokeAlpha="0.7" />
+    <!-- Flame -->
+    <path android:pathData="M84,132 C74,146 72,160 80,166 C88,158 98,154 100,138 Z" android:fillColor="#FFD54A" />
+    <path android:pathData="M88,132 C81,142 80,152 85,158 C91,152 95,148 96,136 Z" android:fillColor="#FF8A2B" />
+    <!-- Rocket body -->
+    <path android:pathData="M100,52 C124,60 136,84 132,116 L108,132 C96,116 88,92 92,68 C94,60 97,54 100,52 Z" android:fillColor="#FFFFFF" />
+    <!-- Nose -->
+    <path android:pathData="M100,52 C104,54 108,60 110,68 C103,70 96,70 92,68 C94,60 97,54 100,52 Z" android:fillColor="#FF6A00" />
+    <!-- Fin -->
+    <path android:pathData="M92,104 C80,108 72,120 72,132 C84,128 92,124 96,116 Z" android:fillColor="#FF6A00" />
+    <!-- Window -->
+    <path android:pathData="M108,84 m-8,0 a8,8 0 1,0 16,0 a8,8 0 1,0 -16,0" android:fillColor="#E64A00" />
+</vector>
