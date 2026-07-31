@@ -76,7 +76,6 @@ Release signing credentials are intentionally excluded from the repository. With
 - Release keys, local configuration, generated builds, and developer-specific files are excluded from version control.
 - Subscription links and imported credentials are stored locally rather than embedded in the source tree.
 - The internal kill switch protects against core failures; Android's **Always-on VPN** and **Block connections without VPN** options provide the strongest system-level protection.
-- Free public configurations should always be treated as untrusted infrastructure.
 
 ## Project Status
 

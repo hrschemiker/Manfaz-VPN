@@ -22,8 +22,8 @@ android {
         applicationId = "com.manfaz.vpn"
         minSdk = 26
         targetSdk = 35
-        versionCode = 7
-        versionName = "1.3.2"
+        versionCode = 8
+        versionName = "1.4.0"
         vectorDrawables { useSupportLibrary = true }
         resourceConfigurations += listOf("fa", "en")
     }
@@ -65,6 +65,15 @@ android {
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
         jniLibs.useLegacyPackaging = true
+    }
+    // Per-ABI APKs avoid shipping native cores for four CPU architectures to every phone.
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+            isUniversalApk = false
+        }
     }
 }
 

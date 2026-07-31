@@ -11,6 +11,9 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -50,8 +53,14 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         ThemeState.load(this)
         handleImportIntent(intent)
-        handleShortcutIntent(intent)
-        maybeAutoConnect()
+        // Give the core process a chance to restore authoritative state before any
+        // auto-connect rule can accidentally restart an already-live tunnel.
+        com.manfaz.vpn.vpn.StateBridge.requestState(this)
+        lifecycleScope.launch {
+            delay(650)
+            handleShortcutIntent(intent)
+            maybeAutoConnect()
+        }
 
         setContent {
             val appearance by ThemeState.appearance.collectAsState()
@@ -82,6 +91,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        com.manfaz.vpn.vpn.StateBridge.requestState(this)
         // Feature #4: offer to import a config found in the clipboard.
         vm.checkClipboard(this)
     }
@@ -127,6 +137,7 @@ class MainActivity : ComponentActivity() {
     private fun handleShortcutIntent(intent: Intent?) {
         when (intent?.getStringExtra(EXTRA_SHORTCUT)) {
             "connect", "fastest" -> { vm.pickFastest(); if (!isConnectedOrConnecting()) requestConnect() }
+            "last" -> if (!isConnectedOrConnecting()) requestConnect()
             "disconnect" -> vm.disconnectNow()
         }
     }

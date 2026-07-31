@@ -25,6 +25,8 @@ import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Sort
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.CalendarMonth
+import androidx.compose.material.icons.filled.DataUsage
 import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
@@ -33,6 +35,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -61,9 +64,11 @@ import com.manfaz.vpn.ui.theme.FailedRed
 import com.manfaz.vpn.ui.theme.NeutralGray
 import com.manfaz.vpn.ui.ltr
 import com.manfaz.vpn.ui.toFarsiDigits
+import com.manfaz.vpn.ui.formatBytes
 import com.manfaz.vpn.ui.landmarkRes
 import com.manfaz.vpn.data.model.Countries
 import com.manfaz.vpn.data.model.ServerConfig
+import com.manfaz.vpn.data.model.Subscription
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
@@ -76,6 +81,7 @@ fun ServersScreen(
     val context = androidx.compose.ui.platform.LocalContext.current
     var menuFor by remember { mutableStateOf<com.manfaz.vpn.data.model.ServerConfig?>(null) }
     val servers by vm.servers.collectAsState()
+    val subscriptions by vm.subscriptions.collectAsState()
     val testing by vm.testing.collectAsState()
     val connection by vm.connection.collectAsState()
     val activeId = connection.server?.id
@@ -93,6 +99,8 @@ fun ServersScreen(
         .filter { it.name.contains(query, ignoreCase = true) }
         .filter { !favoritesOnly || it.favorite }
         .let { list -> if (sortByPing) list.sortedBy { it.pingMs ?: Int.MAX_VALUE } else list.sortedBy { it.name } }
+    val grouped = filtered.groupBy { it.group.ifBlank { "دستی" } }
+    val subscriptionByName = subscriptions.associateBy { it.name }
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Text(
@@ -185,16 +193,21 @@ fun ServersScreen(
         }
 
         LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            items(filtered, key = { it.id }) { server ->
-                val isActive = server.id == activeId
-                CountryServerCard(
-                    server = server,
-                    isActive = isActive,
-                    onConnect = { vm.select(server); onConnect() },
-                    onLongClick = { menuFor = server },
-                    onFavorite = { vm.toggleFavorite(server.id) },
-                    onDelete = { pendingDelete = server },
-                )
+            grouped.forEach { (group, groupServers) ->
+                subscriptionByName[group]?.let { sub ->
+                    item(key = "subscription-${sub.id}") { SubscriptionUsageStrip(sub) }
+                }
+                items(groupServers, key = { it.id }) { server ->
+                    val isActive = server.id == activeId
+                    CountryServerCard(
+                        server = server,
+                        isActive = isActive,
+                        onConnect = { vm.select(server); onConnect() },
+                        onLongClick = { menuFor = server },
+                        onFavorite = { vm.toggleFavorite(server.id) },
+                        onDelete = { pendingDelete = server },
+                    )
+                }
             }
         }
     }
@@ -268,6 +281,62 @@ fun ServersScreen(
                 }) { Text("اشتراک‌گذاری") }
             },
         )
+    }
+}
+
+@Composable
+private fun SubscriptionUsageStrip(sub: Subscription) {
+    val hasQuota = sub.totalBytes > 0L
+    val fraction = if (hasQuota) (sub.usedBytes.toFloat() / sub.totalBytes).coerceIn(0f, 1f) else 0f
+    val days = sub.remainingDays
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f),
+        ),
+    ) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 11.dp)) {
+            Text(
+                sub.name,
+                fontWeight = FontWeight.Black,
+                fontSize = 15.sp,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(7.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.DataUsage, null, Modifier.size(17.dp), tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        if (hasQuota) "باقی‌مانده ${formatBytes(sub.remainingBytes)}" else "حجم نامشخص",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                    )
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.CalendarMonth, null, Modifier.size(17.dp), tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        days?.let { "${it.toString().toFarsiDigits()} روز باقی‌مانده" } ?: "زمان نامشخص",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            if (hasQuota) {
+                Spacer(Modifier.height(8.dp))
+                LinearProgressIndicator(
+                    progress = { fraction },
+                    modifier = Modifier.fillMaxWidth().height(5.dp),
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                )
+            }
+        }
     }
 }
 

@@ -5,6 +5,9 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.Network
@@ -12,8 +15,10 @@ import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.manfaz.vpn.R
 import com.manfaz.vpn.core.HevTunnel
 import com.manfaz.vpn.core.ServerCodec
@@ -64,22 +69,45 @@ class ManfazVpnService : VpnService() {
     @Volatile private var killSwitch: Boolean = false
     @Volatile private var showServerInNotification = true
     @Volatile private var showSpeedInNotification = true
+    @Volatile private var activeServer: com.manfaz.vpn.data.model.ServerConfig? = null
+    @Volatile private var connectedSince: Long = 0L
+    @Volatile private var lastExitIp: String = "متصل"
+
+    private val stateQueryReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == StateBridge.ACTION_QUERY) sendAuthoritativeState()
+        }
+    }
 
     // A3: follow the active network across Wi-Fi <-> mobile without tearing down the tunnel.
     private val connectivity by lazy { getSystemService(ConnectivityManager::class.java) }
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) { setUnderlyingNetworks(arrayOf(network)) }
-        override fun onLost(network: Network) { setUnderlyingNetworks(null) }
+        override fun onLost(network: Network) {
+            // Avoid a transient unbound window while Android switches Wi-Fi/mobile networks.
+            val replacement = connectivity.activeNetwork
+            setUnderlyingNetworks(replacement?.let { arrayOf(it) })
+        }
     }
     private var networkCallbackRegistered = false
+
+    override fun onCreate() {
+        super.onCreate()
+        ContextCompat.registerReceiver(
+            this,
+            stateQueryReceiver,
+            IntentFilter(StateBridge.ACTION_QUERY),
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> { teardown(); stopSelf() }
             else -> startTunnel(intent)
         }
-        // Don't auto-restart a crashed core with a null intent — avoids a crash loop.
-        return START_NOT_STICKY
+        // If Android reclaims this foreground process, redeliver the last connection intent.
+        return if (intent?.action == ACTION_STOP) START_NOT_STICKY else START_REDELIVER_INTENT
     }
 
     private fun startTunnel(intent: Intent?) {
@@ -98,6 +126,7 @@ class ManfazVpnService : VpnService() {
             StateBridge.sendFailed(this, "سروری انتخاب نشده است."); teardown(); stopSelf(); return
         }
         serverName = server.displayLabel
+        activeServer = server
         killSwitch = intent.getBooleanExtra(EXTRA_KILL_SWITCH, false)
         val dnsProtect = intent.getBooleanExtra(EXTRA_DNS_PROTECT, true)
         val ipv6Mode = runCatching {
@@ -121,7 +150,7 @@ class ManfazVpnService : VpnService() {
                 validateDns(remoteDns, dnsBootstrap)
                 val config = XrayConfig.build(
                     server, remoteDns = remoteDns,
-                    dnsLeakProtection = dnsProtect, allowLan = allowLan,
+                    dnsLeakProtection = dnsProtect, allowLan = allowLan, ipv6Mode = ipv6Mode,
                 )
 
                 val builder = Builder()
@@ -157,11 +186,17 @@ class ManfazVpnService : VpnService() {
                     tunnelIpv6 = ipv6Mode == Ipv6Mode.TUNNEL,
                 )
 
-                StateBridge.sendConnected(this@ManfazVpnService, "متصل", server.pingMs ?: 0)
+                connectedSince = SystemClock.elapsedRealtime()
+                lastExitIp = "متصل"
+                StateBridge.sendConnected(
+                    this@ManfazVpnService, server, lastExitIp, server.pingMs ?: 0, connectedSince,
+                )
+                com.manfaz.vpn.widget.ManfazWidget.updateAll(this@ManfazVpnService, true, server.displayLabel)
                 startStatsPolling()
                 // C#9: fetch the real exit IP + country through the proxy
                 launch {
                     com.manfaz.vpn.net.ExitIp.fetch(XrayConfig.SOCKS_PORT)?.let {
+                        lastExitIp = it.ip
                         StateBridge.sendIpInfo(this@ManfazVpnService, it.ip, it.country)
                     }
                 }
@@ -259,11 +294,22 @@ class ManfazVpnService : VpnService() {
                 delay(1000)
                 val (up, down) = XrayCore.queryTraffic()
                 StateBridge.sendTraffic(this@ManfazVpnService, up, down)
+                // Periodic state heartbeat repairs UI state if Android recreated the app process.
+                if (SystemClock.elapsedRealtime() % 5_000L < 1_000L) sendAuthoritativeState()
                 // C#10: live speed in the ongoing notification
                 if (showSpeedInNotification) runCatching {
                     nm.notify(NOTIF_ID, buildNotification("↓ ${speed(down)}   ↑ ${speed(up)}"))
                 }
             }
+        }
+    }
+
+    private fun sendAuthoritativeState() {
+        val server = activeServer
+        if (tun != null && server != null && connectedSince > 0L) {
+            StateBridge.sendConnected(this, server, lastExitIp, server.pingMs ?: 0, connectedSince)
+        } else {
+            StateBridge.sendStopped(this)
         }
     }
 
@@ -281,7 +327,10 @@ class ManfazVpnService : VpnService() {
         XrayCore.stop()
         try { tun?.close() } catch (_: Exception) {}
         tun = null
+        activeServer = null
+        connectedSince = 0L
         stopForegroundCompat()
+        com.manfaz.vpn.widget.ManfazWidget.updateAll(this, false, null)
         StateBridge.sendStopped(this)
     }
 
@@ -330,5 +379,9 @@ class ManfazVpnService : VpnService() {
 
     override fun onRevoke() { teardown(); stopSelf() }
 
-    override fun onDestroy() { teardown(); super.onDestroy() }
+    override fun onDestroy() {
+        runCatching { unregisterReceiver(stateQueryReceiver) }
+        teardown()
+        super.onDestroy()
+    }
 }

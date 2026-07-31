@@ -2,6 +2,7 @@ package com.manfaz.vpn.core
 
 import com.manfaz.vpn.data.model.Protocol
 import com.manfaz.vpn.data.model.ServerConfig
+import com.manfaz.vpn.data.Ipv6Mode
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -23,6 +24,7 @@ object XrayConfig {
         remoteDns: String = "1.1.1.1",
         dnsLeakProtection: Boolean = true,
         allowLan: Boolean = true,
+        ipv6Mode: Ipv6Mode = Ipv6Mode.BLOCK,
     ): String {
         val root = JSONObject()
         root.put("log", JSONObject().put("loglevel", "warning"))
@@ -72,7 +74,8 @@ object XrayConfig {
         val dnsServers = JSONArray().put(remoteDns)
         root.put("dns", JSONObject()
             .put("servers", dnsServers)
-            .put("queryStrategy", "UseIP"))
+            // Never hand apps unusable AAAA answers when IPv6 is intentionally blocked.
+            .put("queryStrategy", if (ipv6Mode == Ipv6Mode.BLOCK) "UseIPv4" else "UseIP"))
 
         return root.toString()
     }

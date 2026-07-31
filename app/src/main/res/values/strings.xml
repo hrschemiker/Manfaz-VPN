@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="widget_description">اتصال سریع منفذ به آخرین سرور</string>
     <!-- Default (English fallback) -->
     <string name="app_name">Manfaz VPN</string>
     <string name="tab_home">Home</string>

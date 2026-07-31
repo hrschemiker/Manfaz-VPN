@@ -147,11 +147,19 @@ object VpnController {
     }
 
     // ---- Called (in UI process) by StateBridge when the core broadcasts ----
-    fun onCoreConnected(ip: String, ping: Int) {
+    fun onCoreConnected(ip: String, ping: Int, server: ServerConfig? = null, since: Long = 0L) {
         watchdog?.cancel(); watchdog = null
         _state.update {
-            it.copy(status = ConnStatus.CONNECTED, ip = ip, pingMs = ping,
-                connectedSinceMs = SystemClock.elapsedRealtime())
+            it.copy(
+                status = ConnStatus.CONNECTED,
+                server = server ?: it.server,
+                ip = ip,
+                pingMs = ping,
+                connectedSinceMs = since.takeIf { marker -> marker > 0L }
+                    ?: it.connectedSinceMs.takeIf { marker -> marker > 0L }
+                    ?: SystemClock.elapsedRealtime(),
+                error = null,
+            )
         }
     }
 

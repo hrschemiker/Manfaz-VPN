@@ -2,6 +2,9 @@ package com.manfaz.vpn.vpn
 
 import android.content.Context
 import android.content.Intent
+import android.os.SystemClock
+import com.manfaz.vpn.core.ServerCodec
+import com.manfaz.vpn.data.model.ServerConfig
 
 /**
  * Cross-process bridge: the VPN core runs in the ":core" process and reports state to the
@@ -17,6 +20,9 @@ object StateBridge {
     const val EXTRA_DOWN = "down"
     const val EXTRA_ERROR = "error"
     const val EXTRA_COUNTRY = "country"
+    const val EXTRA_SERVER = "server"
+    const val EXTRA_SINCE = "since"
+    const val ACTION_QUERY = "com.manfaz.vpn.QUERY_CORE_STATE"
 
     const val EVENT_CONNECTED = "connected"
     const val EVENT_FAILED = "failed"
@@ -24,8 +30,9 @@ object StateBridge {
     const val EVENT_STOPPED = "stopped"
     const val EVENT_IPINFO = "ipinfo"
 
-    fun sendConnected(ctx: Context, ip: String, ping: Int) = send(ctx) {
+    fun sendConnected(ctx: Context, server: ServerConfig, ip: String, ping: Int, since: Long) = send(ctx) {
         putExtra(EXTRA_EVENT, EVENT_CONNECTED); putExtra(EXTRA_IP, ip); putExtra(EXTRA_PING, ping)
+        putExtra(EXTRA_SERVER, ServerCodec.toJson(server)); putExtra(EXTRA_SINCE, since)
     }
 
     fun sendFailed(ctx: Context, error: String) = send(ctx) {
@@ -51,7 +58,12 @@ object StateBridge {
     fun apply(intent: Intent) {
         when (intent.getStringExtra(EXTRA_EVENT)) {
             EVENT_CONNECTED -> VpnController.onCoreConnected(
-                intent.getStringExtra(EXTRA_IP) ?: "متصل", intent.getIntExtra(EXTRA_PING, 0))
+                ip = intent.getStringExtra(EXTRA_IP) ?: "متصل",
+                ping = intent.getIntExtra(EXTRA_PING, 0),
+                server = intent.getStringExtra(EXTRA_SERVER)
+                    ?.let { runCatching { ServerCodec.fromJson(it) }.getOrNull() },
+                since = intent.getLongExtra(EXTRA_SINCE, SystemClock.elapsedRealtime()),
+            )
             EVENT_FAILED -> VpnController.onCoreFailed(intent.getStringExtra(EXTRA_ERROR) ?: "اتصال ناموفق")
             EVENT_TRAFFIC -> VpnController.onTraffic(
                 intent.getLongExtra(EXTRA_UP, 0), intent.getLongExtra(EXTRA_DOWN, 0))
@@ -59,5 +71,10 @@ object StateBridge {
             EVENT_IPINFO -> VpnController.onIpInfo(
                 intent.getStringExtra(EXTRA_IP) ?: "—", intent.getStringExtra(EXTRA_COUNTRY) ?: "")
         }
+    }
+
+    /** Ask the still-running VPN process to resend its authoritative state. */
+    fun requestState(ctx: Context) {
+        ctx.sendBroadcast(Intent(ACTION_QUERY).setPackage(ctx.packageName))
     }
 }

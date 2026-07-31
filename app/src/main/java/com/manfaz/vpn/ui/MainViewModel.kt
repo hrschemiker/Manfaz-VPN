@@ -77,7 +77,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         automaticFailovers = 0; failedThisRun.clear(); maybeFetchFreeConfigs()
                     }
                     com.manfaz.vpn.vpn.ConnStatus.DISCONNECTED -> {
-                        automaticFailovers = 0; failedThisRun.clear(); testPendingFreeConfigs()
+                        automaticFailovers = 0; failedThisRun.clear()
                     }
                     else -> {}
                 }
@@ -187,12 +187,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         VpnController.toggle(getApplication(), target)
     }
 
-    /**
-     * Pool for fastest/random: subscription+manual servers, but fall back to free configs
-     * only when there are no subscription/manual servers at all.
-     */
-    private fun quickPool(): List<ServerConfig> =
-        servers.value.ifEmpty { freeConfigs.value }
+    /** Quick actions are deliberately restricted to the regular server repository. */
+    private fun quickPool(): List<ServerConfig> = servers.value
 
     /** Select the fastest server WITHOUT connecting (caller triggers the consent-aware connect). */
     fun pickFastest() {
@@ -269,21 +265,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             _freeTesting.value = false
             freeSnack(if (removed > 0) "تست کامل شد؛ $removed کانفیگ بدون دانلود حذف شد."
                   else "تست کانفیگ‌های رایگان کامل شد.")
-        }
-    }
-
-    private fun testPendingFreeConfigs() {
-        if (_freeTesting.value) return
-        val pending = freeConfigs.value.filter { it.pingMs == null }
-        if (pending.isEmpty()) return
-        viewModelScope.launch {
-            _freeTesting.value = true
-            val removed = downloadTestAndFilter(pending)
-            _freeTesting.value = false
-            freeSnack(
-                if (removed > 0) "${pending.size - removed} کانفیگ سالم ماند و $removed مورد حذف شد."
-                else "${pending.size} کانفیگ جدید با موفقیت تست شد."
-            )
         }
     }
 
