@@ -11,7 +11,6 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.Network
-import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -83,11 +82,7 @@ class ManfazVpnService : VpnService() {
     private val connectivity by lazy { getSystemService(ConnectivityManager::class.java) }
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) { setUnderlyingNetworks(arrayOf(network)) }
-        override fun onLost(network: Network) {
-            // Avoid a transient unbound window while Android switches Wi-Fi/mobile networks.
-            val replacement = connectivity.activeNetwork
-            setUnderlyingNetworks(replacement?.let { arrayOf(it) })
-        }
+        override fun onLost(network: Network) { setUnderlyingNetworks(null) }
     }
     private var networkCallbackRegistered = false
 
@@ -150,7 +145,7 @@ class ManfazVpnService : VpnService() {
                 validateDns(remoteDns, dnsBootstrap)
                 val config = XrayConfig.build(
                     server, remoteDns = remoteDns,
-                    dnsLeakProtection = dnsProtect, allowLan = allowLan, ipv6Mode = ipv6Mode,
+                    dnsLeakProtection = dnsProtect, allowLan = allowLan,
                 )
 
                 val builder = Builder()
@@ -191,7 +186,7 @@ class ManfazVpnService : VpnService() {
                 StateBridge.sendConnected(
                     this@ManfazVpnService, server, lastExitIp, server.pingMs ?: 0, connectedSince,
                 )
-                com.manfaz.vpn.widget.ManfazWidget.updateAll(this@ManfazVpnService, true, server.displayLabel)
+                com.manfaz.vpn.widget.ManfazWidget.updateAll(this@ManfazVpnService, true, server)
                 startStatsPolling()
                 // C#9: fetch the real exit IP + country through the proxy
                 launch {
@@ -269,7 +264,7 @@ class ManfazVpnService : VpnService() {
         return if (caps?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) == true) 1400 else 1500
     }
 
-    /** A3: keep the tunnel bound to whatever network is currently active. */
+    /** Follow Android's current default network without guessing a replacement ourselves. */
     private fun registerNetworkFollow() {
         if (networkCallbackRegistered) return
         try {
@@ -321,6 +316,7 @@ class ManfazVpnService : VpnService() {
     }
 
     private fun teardown() {
+        val lastServer = activeServer
         statsJob?.cancel(); statsJob = null
         unregisterNetworkFollow()
         HevTunnel.stop()
@@ -330,7 +326,7 @@ class ManfazVpnService : VpnService() {
         activeServer = null
         connectedSince = 0L
         stopForegroundCompat()
-        com.manfaz.vpn.widget.ManfazWidget.updateAll(this, false, null)
+        com.manfaz.vpn.widget.ManfazWidget.updateAll(this, false, lastServer)
         StateBridge.sendStopped(this)
     }
 
