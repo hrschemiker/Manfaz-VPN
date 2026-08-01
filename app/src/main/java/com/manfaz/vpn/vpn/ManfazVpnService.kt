@@ -15,6 +15,7 @@ import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
+import android.system.OsConstants
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -71,6 +72,7 @@ class ManfazVpnService : VpnService() {
     @Volatile private var activeServer: com.manfaz.vpn.data.model.ServerConfig? = null
     @Volatile private var connectedSince: Long = 0L
     @Volatile private var lastExitIp: String = "متصل"
+    @Volatile private var lastHeartbeatAt: Long = 0L
 
     private val stateQueryReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -145,7 +147,7 @@ class ManfazVpnService : VpnService() {
                 validateDns(remoteDns, dnsBootstrap)
                 val config = XrayConfig.build(
                     server, remoteDns = remoteDns,
-                    dnsLeakProtection = dnsProtect, allowLan = allowLan,
+                    dnsLeakProtection = dnsProtect, allowLan = allowLan, ipv6Mode = ipv6Mode,
                 )
 
                 val builder = Builder()
@@ -156,9 +158,13 @@ class ManfazVpnService : VpnService() {
                     // (plain DNS or DoH URL) is handled by Xray.
                     .addDnsServer(dnsBootstrap)
                     .addRoute("0.0.0.0", 0)
-                if (ipv6Mode != Ipv6Mode.DIRECT) {
-                    builder.addAddress("fd00:1:2:3::1", 64)
-                    builder.addRoute("::", 0)
+                when (ipv6Mode) {
+                    Ipv6Mode.BLOCK -> Unit // No IPv6 family configured: Android blocks it cleanly.
+                    Ipv6Mode.TUNNEL -> {
+                        builder.addAddress("fd00:1:2:3::1", 64)
+                        builder.addRoute("::", 0)
+                    }
+                    Ipv6Mode.DIRECT -> builder.allowFamily(OsConstants.AF_INET6)
                 }
                 // A5: per-app split tunnel (or just exclude ourselves to avoid a loop)
                 configurePerApp(builder, perAppEnabled, perAppBypass, perAppList)
@@ -182,8 +188,12 @@ class ManfazVpnService : VpnService() {
                 )
 
                 connectedSince = SystemClock.elapsedRealtime()
+                lastHeartbeatAt = connectedSince
                 lastExitIp = "متصل"
                 StateBridge.sendConnected(
+                    this@ManfazVpnService, server, lastExitIp, server.pingMs ?: 0, connectedSince,
+                )
+                ConnectionSnapshotStore.writeConnected(
                     this@ManfazVpnService, server, lastExitIp, server.pingMs ?: 0, connectedSince,
                 )
                 com.manfaz.vpn.widget.ManfazWidget.updateAll(this@ManfazVpnService, true, server)
@@ -192,6 +202,9 @@ class ManfazVpnService : VpnService() {
                 launch {
                     com.manfaz.vpn.net.ExitIp.fetch(XrayConfig.SOCKS_PORT)?.let {
                         lastExitIp = it.ip
+                        ConnectionSnapshotStore.writeConnected(
+                            this@ManfazVpnService, server, lastExitIp, server.pingMs ?: 0, connectedSince,
+                        )
                         StateBridge.sendIpInfo(this@ManfazVpnService, it.ip, it.country)
                     }
                 }
@@ -290,7 +303,11 @@ class ManfazVpnService : VpnService() {
                 val (up, down) = XrayCore.queryTraffic()
                 StateBridge.sendTraffic(this@ManfazVpnService, up, down)
                 // Periodic state heartbeat repairs UI state if Android recreated the app process.
-                if (SystemClock.elapsedRealtime() % 5_000L < 1_000L) sendAuthoritativeState()
+                val now = SystemClock.elapsedRealtime()
+                if (now - lastHeartbeatAt >= 5_000L) {
+                    lastHeartbeatAt = now
+                    sendAuthoritativeState()
+                }
                 // C#10: live speed in the ongoing notification
                 if (showSpeedInNotification) runCatching {
                     nm.notify(NOTIF_ID, buildNotification("↓ ${speed(down)}   ↑ ${speed(up)}"))
@@ -302,8 +319,10 @@ class ManfazVpnService : VpnService() {
     private fun sendAuthoritativeState() {
         val server = activeServer
         if (tun != null && server != null && connectedSince > 0L) {
+            ConnectionSnapshotStore.writeConnected(this, server, lastExitIp, server.pingMs ?: 0, connectedSince)
             StateBridge.sendConnected(this, server, lastExitIp, server.pingMs ?: 0, connectedSince)
         } else {
+            ConnectionSnapshotStore.writeStopped(this)
             StateBridge.sendStopped(this)
         }
     }
@@ -325,8 +344,10 @@ class ManfazVpnService : VpnService() {
         tun = null
         activeServer = null
         connectedSince = 0L
+        lastHeartbeatAt = 0L
         stopForegroundCompat()
         com.manfaz.vpn.widget.ManfazWidget.updateAll(this, false, lastServer)
+        ConnectionSnapshotStore.writeStopped(this)
         StateBridge.sendStopped(this)
     }
 

@@ -160,7 +160,7 @@ class Prefs(context: Context) {
 
     /** Auto-scan for a clean Cloudflare IP before connecting CDN configs. */
     var cloudflareScan: Boolean
-        get() = sp.getBoolean(CF_SCAN, true)
+        get() = sp.getBoolean(CF_SCAN, false)
         set(v) = sp.edit().putBoolean(CF_SCAN, v).apply()
 
     /** All preferences are included only inside the password-encrypted backup. */

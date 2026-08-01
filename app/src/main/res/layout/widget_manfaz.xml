@@ -1,51 +1,76 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/widget_root"
     android:layout_width="match_parent"
     android:layout_height="72dp"
     android:background="@drawable/widget_background"
-    android:gravity="center_vertical"
-    android:orientation="horizontal"
-    android:paddingHorizontal="16dp"
-    android:paddingVertical="8dp">
+    android:clipToOutline="true">
 
     <ImageView
         android:id="@+id/widget_country_art"
-        android:layout_width="82dp"
-        android:layout_height="56dp"
+        android:layout_width="150dp"
+        android:layout_height="match_parent"
+        android:layout_gravity="end|center_vertical"
+        android:alpha="0.20"
         android:contentDescription="طرح کشور آخرین سرور"
         android:scaleType="centerCrop"
         android:src="@drawable/country_generic_network" />
 
     <LinearLayout
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:layout_marginHorizontal="10dp"
-        android:layout_weight="1"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
         android:gravity="center_vertical"
-        android:orientation="vertical">
+        android:orientation="horizontal"
+        android:paddingHorizontal="14dp"
+        android:paddingVertical="9dp">
 
         <TextView
-            android:id="@+id/widget_status"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:ellipsize="end"
-            android:maxLines="1"
-            android:text="اتصال سریع به آخرین سرور"
-            android:textColor="#EFFFFFFF"
-            android:textDirection="rtl"
-            android:textSize="13sp"
+            android:id="@+id/widget_action"
+            android:layout_width="64dp"
+            android:layout_height="38dp"
+            android:background="@drawable/widget_action_off_background"
+            android:fontFamily="@font/iransans"
+            android:gravity="center"
+            android:text="OFF"
+            android:textColor="@color/widget_switch_off_text"
+            android:textSize="12sp"
             android:textStyle="bold" />
-    </LinearLayout>
 
-    <TextView
-        android:id="@+id/widget_action"
-        android:layout_width="72dp"
-        android:layout_height="40dp"
-        android:background="@drawable/widget_action_background"
-        android:gravity="center"
-        android:text="اتصال"
-        android:textColor="#FFFF6A00"
-        android:textSize="13sp"
-        android:textStyle="bold" />
-</LinearLayout>
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="14dp"
+            android:layout_weight="1"
+            android:gravity="end"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/widget_status"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:fontFamily="@font/iransans"
+                android:gravity="end"
+                android:maxLines="1"
+                android:text="آخرین سرور"
+                android:textColor="@color/widget_title"
+                android:textDirection="rtl"
+                android:textSize="13sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/widget_subtitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:ellipsize="end"
+                android:fontFamily="@font/iransans"
+                android:gravity="end"
+                android:maxLines="1"
+                android:text="برای اتصال کلید را لمس کنید"
+                android:textColor="@color/widget_subtitle"
+                android:textDirection="rtl"
+                android:textSize="10sp" />
+        </LinearLayout>
+    </LinearLayout>
+</FrameLayout>

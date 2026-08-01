@@ -7,7 +7,7 @@
     android:minHeight="64dp"
     android:targetCellWidth="5"
     android:targetCellHeight="1"
-    android:previewImage="@mipmap/ic_launcher"
+    android:previewLayout="@layout/widget_manfaz"
     android:resizeMode="horizontal"
     android:updatePeriodMillis="0"
     android:widgetCategory="home_screen" />

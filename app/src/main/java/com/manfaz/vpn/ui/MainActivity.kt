@@ -55,6 +55,7 @@ class MainActivity : ComponentActivity() {
         handleImportIntent(intent)
         // Give the core process a chance to restore authoritative state before any
         // auto-connect rule can accidentally restart an already-live tunnel.
+        com.manfaz.vpn.vpn.VpnController.restoreFromSnapshot(this)
         com.manfaz.vpn.vpn.StateBridge.requestState(this)
         lifecycleScope.launch {
             delay(650)
@@ -91,6 +92,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        com.manfaz.vpn.vpn.VpnController.restoreFromSnapshot(this)
         com.manfaz.vpn.vpn.StateBridge.requestState(this)
         // Feature #4: offer to import a config found in the clipboard.
         vm.checkClipboard(this)

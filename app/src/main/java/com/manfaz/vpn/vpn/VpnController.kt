@@ -163,6 +163,23 @@ object VpnController {
         }
     }
 
+    /** Restore authoritative core state after the UI process/activity was recreated. */
+    fun restoreFromSnapshot(context: Context) {
+        val snapshot = ConnectionSnapshotStore.read(context) ?: return
+        if (snapshot.connected && snapshot.isFresh && snapshot.server != null) {
+            onCoreConnected(
+                ip = snapshot.ip,
+                ping = snapshot.ping,
+                server = snapshot.server,
+                since = snapshot.connectedSince,
+            )
+        } else if (!snapshot.connected && snapshot.isFresh &&
+            _state.value.status == ConnStatus.CONNECTED
+        ) {
+            onServiceStopped()
+        }
+    }
+
     fun onCoreFailed(message: String) {
         watchdog?.cancel(); watchdog = null
         // If a clean-IP attempt failed, silently fall back to the original config once.

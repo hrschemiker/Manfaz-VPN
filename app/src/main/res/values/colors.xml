@@ -1,5 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <color name="widget_surface">#FFFEFBF8</color>
+    <color name="widget_border">#26E86816</color>
+    <color name="widget_title">#FF241B16</color>
+    <color name="widget_subtitle">#FF75675F</color>
+    <color name="widget_switch_on_text">#FFFFFFFF</color>
+    <color name="widget_switch_off_text">#FFE85F0C</color>
+    <color name="widget_switch_off_surface">#FFFFF4EC</color>
+    <color name="widget_switch_off_stroke">#66E86816</color>
     <color name="brand_orange">#FF6A00</color>
     <color name="brand_orange_light">#FF8A2B</color>
     <color name="brand_orange_deep">#E64A00</color>

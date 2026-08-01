@@ -22,8 +22,8 @@ android {
         applicationId = "com.manfaz.vpn"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
-        versionName = "1.4.1"
+        versionCode = 10
+        versionName = "1.5.0"
         vectorDrawables { useSupportLibrary = true }
         resourceConfigurations += listOf("fa", "en")
     }
@@ -103,6 +103,9 @@ dependencies {
 
     // Xray core (AndroidLibXrayLite) — real proxy engine
     implementation(":libv2ray@aar")
+
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 
     debugImplementation(libs.androidx.ui.tooling)
 }

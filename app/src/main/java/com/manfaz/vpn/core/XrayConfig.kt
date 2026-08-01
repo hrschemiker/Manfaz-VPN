@@ -2,6 +2,7 @@ package com.manfaz.vpn.core
 
 import com.manfaz.vpn.data.model.Protocol
 import com.manfaz.vpn.data.model.ServerConfig
+import com.manfaz.vpn.data.Ipv6Mode
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -23,6 +24,7 @@ object XrayConfig {
         remoteDns: String = "1.1.1.1",
         dnsLeakProtection: Boolean = true,
         allowLan: Boolean = true,
+        ipv6Mode: Ipv6Mode = Ipv6Mode.BLOCK,
     ): String {
         val root = JSONObject()
         root.put("log", JSONObject().put("loglevel", "warning"))
@@ -43,12 +45,15 @@ object XrayConfig {
             .put("settings", JSONObject().put("udp", true).put("auth", "noauth"))
             .put("sniffing", JSONObject()
                 .put("enabled", true)
-                .put("destOverride", JSONArray(listOf("http", "tls", "quic"))))
+                .put("destOverride", JSONArray(listOf("http", "tls", "quic")))
+                // Observe the domain for routing, but keep the application's original
+                // destination. Rewriting it breaks some push/CDN/QUIC flows.
+                .put("routeOnly", true))
         root.put("inbounds", JSONArray().put(inbound))
 
         // Outbounds: proxy, direct, dns
         val outbounds = JSONArray()
-        outbounds.put(proxyOutbound(server))
+        outbounds.put(proxyOutbound(server, ipv6Mode))
         outbounds.put(JSONObject().put("tag", "direct").put("protocol", "freedom"))
         outbounds.put(JSONObject().put("tag", "dns-out").put("protocol", "dns"))
         outbounds.put(JSONObject().put("tag", "block").put("protocol", "blackhole"))
@@ -65,21 +70,21 @@ object XrayConfig {
             .put("outboundTag", if (allowLan) "direct" else "block")
             .put("ip", JSONArray(listOf("geoip:private"))))
         root.put("routing", JSONObject()
-            .put("domainStrategy", "IPIfNonMatch")
+            // There are no domain/IP split rules that justify resolving every destination
+            // twice. AsIs is Xray's default and avoids needless DNS latency.
+            .put("domainStrategy", "AsIs")
             .put("rules", rules))
 
         // DNS: resolve through the proxy (remote resolver)
         val dnsServers = JSONArray().put(remoteDns)
         root.put("dns", JSONObject()
             .put("servers", dnsServers)
-            // Preserve dual-stack answers. Android/Xray can then choose the reachable
-            // address instead of losing services that publish IPv6-sensitive records.
-            .put("queryStrategy", "UseIP"))
+            .put("queryStrategy", if (ipv6Mode == Ipv6Mode.BLOCK) "UseIPv4" else "UseIP"))
 
         return root.toString()
     }
 
-    private fun proxyOutbound(s: ServerConfig): JSONObject {
+    private fun proxyOutbound(s: ServerConfig, ipv6Mode: Ipv6Mode): JSONObject {
         val out = JSONObject().put("tag", "proxy")
         when (s.protocol) {
             Protocol.VLESS -> {
@@ -124,7 +129,7 @@ object XrayConfig {
             }
             else -> throw IllegalArgumentException("پروتکل ${s.protocol.label} در هسته Xray پشتیبانی نمی‌شود")
         }
-        out.put("streamSettings", streamSettings(s))
+        out.put("streamSettings", streamSettings(s, ipv6Mode))
         return out
     }
 
@@ -154,9 +159,15 @@ object XrayConfig {
         else -> net.lowercase()
     }
 
-    private fun streamSettings(s: ServerConfig): JSONObject {
+    private fun streamSettings(s: ServerConfig, ipv6Mode: Ipv6Mode): JSONObject {
         val net = normalizeNetwork(s.network)
-        val ss = JSONObject().put("network", net)
+        val ss = JSONObject()
+            .put("network", net)
+            // Resolve the proxy endpoint consistently with the selected IPv6 mode.
+            .put("sockopt", JSONObject().put(
+                "domainStrategy",
+                if (ipv6Mode == Ipv6Mode.BLOCK) "UseIPv4" else "UseIPv4v6",
+            ))
 
         // Transport
         when (net) {
