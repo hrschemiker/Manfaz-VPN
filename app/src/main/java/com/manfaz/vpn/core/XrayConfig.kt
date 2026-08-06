@@ -22,9 +22,9 @@ object XrayConfig {
     fun build(
         server: ServerConfig,
         remoteDns: String = "1.1.1.1",
-        dnsLeakProtection: Boolean = true,
+        dnsLeakProtection: Boolean = false,
         allowLan: Boolean = true,
-        ipv6Mode: Ipv6Mode = Ipv6Mode.BLOCK,
+        ipv6Mode: Ipv6Mode = Ipv6Mode.DIRECT,
     ): String {
         val root = JSONObject()
         root.put("log", JSONObject().put("loglevel", "warning"))

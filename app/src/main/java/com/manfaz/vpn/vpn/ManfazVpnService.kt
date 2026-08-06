@@ -9,8 +9,6 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.IntentFilter
 import android.content.pm.PackageManager
-import android.net.ConnectivityManager
-import android.net.Network
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -30,6 +28,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -63,7 +63,9 @@ class ManfazVpnService : VpnService() {
     }
 
     private var tun: ParcelFileDescriptor? = null
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val serviceJob = SupervisorJob()
+    private val scope = CoroutineScope(serviceJob + Dispatchers.IO)
+    private var connectJob: Job? = null
     private var statsJob: Job? = null
     @Volatile private var serverName: String = "Manfaz VPN"
     @Volatile private var killSwitch: Boolean = false
@@ -80,14 +82,6 @@ class ManfazVpnService : VpnService() {
         }
     }
 
-    // A3: follow the active network across Wi-Fi <-> mobile without tearing down the tunnel.
-    private val connectivity by lazy { getSystemService(ConnectivityManager::class.java) }
-    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
-        override fun onAvailable(network: Network) { setUnderlyingNetworks(arrayOf(network)) }
-        override fun onLost(network: Network) { setUnderlyingNetworks(null) }
-    }
-    private var networkCallbackRegistered = false
-
     override fun onCreate() {
         super.onCreate()
         ContextCompat.registerReceiver(
@@ -100,7 +94,10 @@ class ManfazVpnService : VpnService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_STOP -> { teardown(); stopSelf() }
+            ACTION_STOP -> {
+                connectJob?.cancel(); connectJob = null
+                teardown(); stopSelf(startId)
+            }
             else -> startTunnel(intent)
         }
         // If Android reclaims this foreground process, redeliver the last connection intent.
@@ -108,6 +105,7 @@ class ManfazVpnService : VpnService() {
     }
 
     private fun startTunnel(intent: Intent?) {
+        connectJob?.cancel()
         createChannel()
         startForeground(NOTIF_ID, buildNotification())
         // Clean restart if a previous tunnel is still up (switching servers).
@@ -125,10 +123,10 @@ class ManfazVpnService : VpnService() {
         serverName = server.displayLabel
         activeServer = server
         killSwitch = intent.getBooleanExtra(EXTRA_KILL_SWITCH, false)
-        val dnsProtect = intent.getBooleanExtra(EXTRA_DNS_PROTECT, true)
+        val dnsProtect = intent.getBooleanExtra(EXTRA_DNS_PROTECT, false)
         val ipv6Mode = runCatching {
-            Ipv6Mode.valueOf(intent.getStringExtra(EXTRA_IPV6_MODE) ?: Ipv6Mode.BLOCK.name)
-        }.getOrDefault(Ipv6Mode.BLOCK)
+            Ipv6Mode.valueOf(intent.getStringExtra(EXTRA_IPV6_MODE) ?: Ipv6Mode.DIRECT.name)
+        }.getOrDefault(Ipv6Mode.DIRECT)
         val remoteDns = intent.getStringExtra(EXTRA_REMOTE_DNS) ?: "1.1.1.1"
         val dnsBootstrap = intent.getStringExtra(EXTRA_DNS_BOOTSTRAP) ?: "1.1.1.1"
         val requestedMtu = intent.getIntExtra(EXTRA_MTU, 0)
@@ -141,7 +139,7 @@ class ManfazVpnService : VpnService() {
         val perAppBypass = intent.getBooleanExtra(EXTRA_PERAPP_BYPASS, true)
         val perAppList = intent.getStringArrayExtra(EXTRA_PERAPP_LIST)?.toList() ?: emptyList()
 
-        scope.launch {
+        connectJob = scope.launch {
             try {
                 XrayCore.initEnv(this@ManfazVpnService)
                 validateDns(remoteDns, dnsBootstrap)
@@ -154,10 +152,10 @@ class ManfazVpnService : VpnService() {
                     .setSession("Manfaz VPN")
                     .setMtu(mtu)
                     .addAddress(HevTunnel.TUN_IPV4, 30)
-                    // Android only accepts a numeric address here. The actual resolver
-                    // (plain DNS or DoH URL) is handled by Xray.
-                    .addDnsServer(dnsBootstrap)
                     .addRoute("0.0.0.0", 0)
+                // A custom resolver is opt-in. Without it Android inherits the physical
+                // network's DNS instead of silently forcing 1.1.1.1.
+                if (dnsProtect) builder.addDnsServer(dnsBootstrap)
                 when (ipv6Mode) {
                     Ipv6Mode.BLOCK -> Unit // No IPv6 family configured: Android blocks it cleanly.
                     Ipv6Mode.TUNNEL -> {
@@ -173,7 +171,6 @@ class ManfazVpnService : VpnService() {
                 val pfd = builder.establish()
                     ?: throw IllegalStateException("VPN permission is required.")
                 tun = pfd
-                registerNetworkFollow()
 
                 com.manfaz.vpn.util.LogBuffer.log(this@ManfazVpnService, "connect", "starting ${server.displayLabel} (${server.protocol.label})")
                 // 1) Start Xray core with the SOCKS inbound (tunFd=0 — hev drives the TUN)
@@ -208,6 +205,8 @@ class ManfazVpnService : VpnService() {
                         StateBridge.sendIpInfo(this@ManfazVpnService, it.ip, it.country)
                     }
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Throwable) {
                 Log.e(TAG, "startTunnel failed", e)
                 com.manfaz.vpn.util.LogBuffer.log(this@ManfazVpnService, "error", e.message ?: e.toString())
@@ -273,25 +272,9 @@ class ManfazVpnService : VpnService() {
     }
 
     private fun autoMtu(): Int {
+        val connectivity = getSystemService(android.net.ConnectivityManager::class.java)
         val caps = connectivity.getNetworkCapabilities(connectivity.activeNetwork)
         return if (caps?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) == true) 1400 else 1500
-    }
-
-    /** Follow Android's current default network without guessing a replacement ourselves. */
-    private fun registerNetworkFollow() {
-        if (networkCallbackRegistered) return
-        try {
-            connectivity.registerDefaultNetworkCallback(networkCallback)
-            networkCallbackRegistered = true
-        } catch (e: Exception) {
-            Log.w(TAG, "requestNetwork failed: ${e.message}")
-        }
-    }
-
-    private fun unregisterNetworkFollow() {
-        if (!networkCallbackRegistered) return
-        runCatching { connectivity.unregisterNetworkCallback(networkCallback) }
-        networkCallbackRegistered = false
     }
 
     private fun startStatsPolling() {
@@ -337,7 +320,6 @@ class ManfazVpnService : VpnService() {
     private fun teardown() {
         val lastServer = activeServer
         statsJob?.cancel(); statsJob = null
-        unregisterNetworkFollow()
         HevTunnel.stop()
         XrayCore.stop()
         try { tun?.close() } catch (_: Exception) {}
@@ -397,6 +379,8 @@ class ManfazVpnService : VpnService() {
     override fun onRevoke() { teardown(); stopSelf() }
 
     override fun onDestroy() {
+        connectJob?.cancel(); connectJob = null
+        serviceJob.cancel()
         runCatching { unregisterReceiver(stateQueryReceiver) }
         teardown()
         super.onDestroy()

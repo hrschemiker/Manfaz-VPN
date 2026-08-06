@@ -19,11 +19,11 @@ class Prefs(context: Context) {
         set(v) = sp.edit().putBoolean(KILL_SWITCH, v).apply()
 
     var dnsLeakProtection: Boolean
-        get() = sp.getBoolean(DNS_PROTECT, true)
+        get() = sp.getBoolean(DNS_PROTECT, false)
         set(v) = sp.edit().putBoolean(DNS_PROTECT, v).apply()
 
     var blockIpv6: Boolean
-        get() = sp.getBoolean(BLOCK_IPV6, true)
+        get() = sp.getBoolean(BLOCK_IPV6, false)
         set(v) = sp.edit().putBoolean(BLOCK_IPV6, v).apply()
 
     var ipv6Mode: Ipv6Mode

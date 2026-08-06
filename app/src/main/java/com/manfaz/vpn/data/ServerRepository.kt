@@ -67,6 +67,17 @@ object ServerRepository {
         persist()
     }
 
+    /** Apply a full latency run in one state update and one encrypted-file write. */
+    fun updatePings(results: Map<String, Int?>) {
+        if (results.isEmpty()) return
+        _servers.update { list ->
+            list.map { server ->
+                if (results.containsKey(server.id)) server.copy(pingMs = results[server.id]) else server
+            }
+        }
+        persist()
+    }
+
     fun clear() { _servers.update { emptyList() }; persist() }
 
     fun replaceAll(list: List<ServerConfig>) {

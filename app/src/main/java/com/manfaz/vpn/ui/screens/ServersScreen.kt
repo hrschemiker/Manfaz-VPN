@@ -143,7 +143,7 @@ fun ServersScreen(
             TextButton(onClick = { sortByPing = !sortByPing }) {
                 Icon(Icons.Filled.Sort, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.size(6.dp))
-                Text(if (sortByPing) "مرتب‌سازی: پینگ" else "مرتب‌سازی: نام")
+                Text(if (sortByPing) "مرتب‌سازی: تأخیر" else "مرتب‌سازی: نام")
             }
             TextButton(onClick = { vm.testAll() }, enabled = !testing) {
                 if (testing) {
@@ -152,7 +152,7 @@ fun ServersScreen(
                     Icon(Icons.Filled.Speed, contentDescription = null, modifier = Modifier.size(18.dp))
                 }
                 Spacer(Modifier.size(6.dp))
-                Text(if (testing) "در حال تست…" else "تست همه")
+                Text(if (testing) "در حال تست واقعی…" else "تست تأخیر")
             }
             TextButton(onClick = { favoritesOnly = !favoritesOnly }) {
                 Icon(

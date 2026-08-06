@@ -57,7 +57,7 @@ class MainActivity : ComponentActivity() {
         // auto-connect rule can accidentally restart an already-live tunnel.
         com.manfaz.vpn.vpn.VpnController.restoreFromSnapshot(this)
         com.manfaz.vpn.vpn.StateBridge.requestState(this)
-        lifecycleScope.launch {
+        if (savedInstanceState == null) lifecycleScope.launch {
             delay(650)
             handleShortcutIntent(intent)
             maybeAutoConnect()

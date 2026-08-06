@@ -23,18 +23,24 @@ class ManfazWidget : AppWidgetProvider() {
         ServerRepository.init(context)
         val server = lastServer(context)
         val snapshot = ConnectionSnapshotStore.read(context)
-        val connected = snapshot?.connected == true && snapshot.isFresh
+        val connected = snapshot?.connected == true
         ids.forEach { manager.updateAppWidget(it, views(context, connected, server)) }
     }
 
     override fun onReceive(context: Context, intent: Intent) {
         super.onReceive(context, intent)
-        if (intent.action == ACTION_DISCONNECT) {
-            context.stopService(Intent(context, com.manfaz.vpn.vpn.ManfazVpnService::class.java))
-            updateAll(context, false, lastServer(context))
+        if (intent.action != ACTION_TOGGLE) return
+
+        val snapshot = ConnectionSnapshotStore.read(context)
+        if (snapshot?.connected == true) {
+            // Deliver the explicit stop command to the already-running foreground service.
+            context.startService(
+                Intent(context, com.manfaz.vpn.vpn.ManfazVpnService::class.java)
+                    .setAction(com.manfaz.vpn.vpn.ManfazVpnService.ACTION_STOP),
+            )
+            updateAll(context, false, snapshot.server ?: lastServer(context))
             return
         }
-        if (intent.action != ACTION_CONNECT_LAST) return
 
         if (VpnService.prepare(context) != null) {
             openForConsent(context)
@@ -60,8 +66,7 @@ class ManfazWidget : AppWidgetProvider() {
     }
 
     companion object {
-        private const val ACTION_CONNECT_LAST = "com.manfaz.vpn.widget.CONNECT_LAST"
-        private const val ACTION_DISCONNECT = "com.manfaz.vpn.widget.DISCONNECT"
+        private const val ACTION_TOGGLE = "com.manfaz.vpn.widget.TOGGLE"
 
         fun updateAll(
             context: Context,
@@ -113,9 +118,9 @@ class ManfazWidget : AppWidgetProvider() {
             )
             val toggle = PendingIntent.getBroadcast(
                 context,
-                if (connected) 4103 else 4102,
+                4102,
                 Intent(context, ManfazWidget::class.java)
-                    .setAction(if (connected) ACTION_DISCONNECT else ACTION_CONNECT_LAST),
+                    .setAction(ACTION_TOGGLE),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
             remote.setOnClickPendingIntent(R.id.widget_action, toggle)

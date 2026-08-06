@@ -17,8 +17,7 @@ class ManfazTileService : TileService() {
 
     override fun onStartListening() {
         super.onStartListening()
-        val connected = VpnController.state.value.status == ConnStatus.CONNECTED ||
-            VpnController.state.value.status == ConnStatus.CONNECTING
+        val connected = ConnectionSnapshotStore.read(this)?.connected == true
         qsTile?.apply {
             state = if (connected) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
             label = if (connected) "منفذ: متصل" else "منفذ: قطع"
@@ -28,10 +27,11 @@ class ManfazTileService : TileService() {
 
     override fun onClick() {
         super.onClick()
-        val connected = VpnController.state.value.status == ConnStatus.CONNECTED ||
-            VpnController.state.value.status == ConnStatus.CONNECTING
+        val connected = ConnectionSnapshotStore.read(this)?.connected == true
         if (connected) {
-            VpnController.disconnect(applicationContext)
+            startService(
+                Intent(this, ManfazVpnService::class.java).setAction(ManfazVpnService.ACTION_STOP),
+            )
             onStartListening()
             return
         }

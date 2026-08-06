@@ -51,10 +51,8 @@ object VpnController {
 
     fun connect(context: Context, server: ServerConfig) {
         mockWorker?.cancel()
-        // Switching while already up: tear the current tunnel down first for a clean restart.
-        if (_state.value.status != ConnStatus.DISCONNECTED && _state.value.status != ConnStatus.FAILED) {
-            stopService(context.applicationContext)
-        }
+        // The service performs an ordered in-process handover. Sending STOP immediately
+        // before START races stopSelf() against the next start request and creates outages.
         pendingServer = server
         originalServer = server
         usedCleanIp = false
@@ -166,7 +164,9 @@ object VpnController {
     /** Restore authoritative core state after the UI process/activity was recreated. */
     fun restoreFromSnapshot(context: Context) {
         val snapshot = ConnectionSnapshotStore.read(context) ?: return
-        if (snapshot.connected && snapshot.isFresh && snapshot.server != null) {
+        // A connected snapshot remains authoritative until the core explicitly writes
+        // STOPPED. Doze may delay heartbeats, but it does not mean the VPN disconnected.
+        if (snapshot.connected && snapshot.server != null) {
             onCoreConnected(
                 ip = snapshot.ip,
                 ping = snapshot.ping,

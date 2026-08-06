@@ -11,7 +11,6 @@ import com.manfaz.vpn.core.XrayConfig
 import com.manfaz.vpn.core.XrayCore
 import com.manfaz.vpn.data.Prefs
 import com.manfaz.vpn.data.parser.ConfigParser
-import com.manfaz.vpn.net.Pinger
 import com.manfaz.vpn.vpn.ConnStatus
 import com.manfaz.vpn.vpn.VpnController
 import kotlinx.coroutines.Dispatchers
@@ -19,6 +18,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -220,7 +224,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         snack("سرور حذف شد.")
     }
 
-    // ---- Stable latency testing: sequential, median of three full proxy requests ----
+    // ---- Real end-to-end proxy latency, tested concurrently with bounded native work ----
     fun testAll() = testServers(servers.value)
     fun testOne(server: ServerConfig) = testServers(listOf(server))
 
@@ -229,25 +233,33 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val app = getApplication<Application>()
         viewModelScope.launch {
             _testing.value = true
-            list.forEach { server ->
-                val samples = mutableListOf<Int>()
-                repeat(3) {
-                    val value = if (XrayConfig.isSupportedByXray(server.protocol)) {
-                        kotlinx.coroutines.withContext(Dispatchers.IO) {
-                            XrayCore.measureDelay(app, XrayConfig.build(server))
-                        } ?: Pinger.tcpPing(server)
-                    } else {
-                        Pinger.tcpPing(server)
-                    }
-                    value?.let(samples::add)
+            try {
+                coroutineScope {
+                    val gate = Semaphore(4)
+                    val results = list.map { server ->
+                        async(Dispatchers.IO) {
+                            val latency = gate.withPermit {
+                                if (!XrayConfig.isSupportedByXray(server.protocol)) return@withPermit null
+                                XrayCore.measureDelay(
+                                    app,
+                                    XrayConfig.build(
+                                        server = server,
+                                        remoteDns = prefs.remoteDns,
+                                        dnsLeakProtection = prefs.dnsLeakProtection,
+                                        allowLan = prefs.allowLan,
+                                        ipv6Mode = prefs.ipv6Mode,
+                                    ),
+                                )
+                            }
+                            server.id to latency
+                        }
+                    }.awaitAll()
+                    ServerRepository.updatePings(results.toMap())
                 }
-                ServerRepository.updatePing(
-                    server.id,
-                    samples.sorted().let { values -> values.getOrNull(values.size / 2) },
-                )
+                snack("تست واقعی سرورها کامل شد.")
+            } finally {
+                _testing.value = false
             }
-            _testing.value = false
-            snack("تست سرورها کامل شد.")
         }
     }
 

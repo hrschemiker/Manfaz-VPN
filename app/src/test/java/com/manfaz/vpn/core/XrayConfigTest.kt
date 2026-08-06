@@ -19,6 +19,20 @@ class XrayConfigTest {
     )
 
     @Test
+    fun advancedNetworkPoliciesAreOptInByDefault() {
+        val root = JSONObject(XrayConfig.build(server))
+        val dnsRule = root.getJSONObject("routing").getJSONArray("rules").getJSONObject(0)
+        assertEquals("direct", dnsRule.getString("outboundTag"))
+        assertEquals("UseIP", root.getJSONObject("dns").getString("queryStrategy"))
+        assertEquals(
+            "UseIPv4v6",
+            root.getJSONArray("outbounds").getJSONObject(0)
+                .getJSONObject("streamSettings").getJSONObject("sockopt")
+                .getString("domainStrategy"),
+        )
+    }
+
+    @Test
     fun regularRoutingDoesNotForceSecondDnsLookup() {
         val root = JSONObject(XrayConfig.build(server))
         assertEquals("AsIs", root.getJSONObject("routing").getString("domainStrategy"))
