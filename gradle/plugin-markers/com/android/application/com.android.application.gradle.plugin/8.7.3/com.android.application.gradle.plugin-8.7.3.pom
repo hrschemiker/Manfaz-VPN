@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.android.application</groupId>
+  <artifactId>com.android.application.gradle.plugin</artifactId>
+  <version>8.7.3</version>
+  <packaging>pom</packaging>
+  <dependencies>
+    <dependency>
+      <groupId>com.android.tools.build</groupId>
+      <artifactId>gradle</artifactId>
+      <version>8.7.3</version>
+    </dependency>
+  </dependencies>
+</project>

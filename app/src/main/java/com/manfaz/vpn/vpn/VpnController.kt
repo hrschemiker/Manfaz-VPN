@@ -1,0 +1,292 @@
+package com.manfaz.vpn.vpn
+
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+import android.os.SystemClock
+import com.manfaz.vpn.core.ServerCodec
+import com.manfaz.vpn.core.XrayConfig
+import com.manfaz.vpn.data.Prefs
+import com.manfaz.vpn.net.CloudflareScanner
+import com.manfaz.vpn.data.model.ServerConfig
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlin.random.Random
+
+/**
+ * Coordinates connection state between the UI and [ManfazVpnService].
+ *
+ * Real servers run through the Xray core inside the VPN service (which owns the TUN).
+ * The built-in "example.com" sample servers use a simulated path so the app can be
+ * demoed without a real subscription.
+ */
+object VpnController {
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var mockWorker: Job? = null
+    private var watchdog: Job? = null
+    private var scanJob: Job? = null
+    private var appContext: Context? = null
+
+    /**
+     * True while a connect is still wanted. Cleared by [disconnect] and terminal failures so
+     * a Cloudflare scan that finishes late can never resurrect the VPN behind the user's back.
+     */
+    @Volatile private var connectWanted = false
+
+    private val _state = MutableStateFlow(ConnectionState())
+    val state: StateFlow<ConnectionState> = _state.asStateFlow()
+
+    /** Server the service should connect (read by ManfazVpnService on start). */
+    @Volatile var pendingServer: ServerConfig? = null
+        private set
+
+    // Cloudflare clean-IP fallback bookkeeping.
+    @Volatile private var originalServer: ServerConfig? = null
+    @Volatile private var usedCleanIp = false
+    @Volatile private var triedOriginal = false
+
+    private fun isSample(s: ServerConfig) = s.address.endsWith("example.com")
+
+    fun connect(context: Context, server: ServerConfig) {
+        mockWorker?.cancel()
+        scanJob?.cancel(); scanJob = null
+        watchdog?.cancel(); watchdog = null
+        connectWanted = true
+        // Monotonic uptime marker: the ":core" service process survives UI-process restarts,
+        // so a plain counter would reset and let a stale START through. Uptime never resets.
+        val epoch = SystemClock.elapsedRealtimeNanos()
+        // The service performs an ordered in-process handover. Sending STOP immediately
+        // before START races stopSelf() against the next start request and creates outages.
+        pendingServer = server
+        originalServer = server
+        usedCleanIp = false
+        triedOriginal = false
+
+        // Guard: protocols the Xray core cannot handle
+        if (!isSample(server) && !XrayConfig.isSupportedByXray(server.protocol)) {
+            connectWanted = false
+            _state.value = ConnectionState(
+                status = ConnStatus.FAILED, server = server,
+                error = "پروتکل ${server.protocol.label} در این نسخه پشتیبانی نمی‌شود.",
+            )
+            return
+        }
+
+        appContext = context.applicationContext
+
+        if (isSample(server)) {
+            _state.value = ConnectionState(status = ConnStatus.CONNECTING, server = server)
+            startMock(server)
+            return
+        }
+
+        val prefs = Prefs(context.applicationContext)
+        // Auto Cloudflare clean-IP scan for eligible (CDN) configs.
+        if (prefs.cloudflareScan && CloudflareScanner.isCdnEligible(server)) {
+            _state.value = ConnectionState(status = ConnStatus.SCANNING, server = server)
+            scanJob = scope.launch {
+                val verified = runCatching { CloudflareScanner.isVerifiedCloudflare(server) }.getOrDefault(false)
+                val ip = if (verified) runCatching { CloudflareScanner.findBest() }.getOrNull() else null
+                // A disconnect may have landed while the scan was running — never
+                // start the VPN for a connection the user already cancelled.
+                if (!connectWanted) return@launch
+                val target = if (ip != null) {
+                    usedCleanIp = true
+                    CloudflareScanner.withCleanIp(server, ip)
+                } else server
+                _state.update { it.copy(status = ConnStatus.CONNECTING) }
+                if (!connectWanted) return@launch
+                startRealService(prefs, target, epoch)
+                if (!connectWanted) {
+                    stopService(appContext ?: return@launch)
+                    return@launch
+                }
+                startWatchdog()
+            }
+        } else {
+            _state.value = ConnectionState(status = ConnStatus.CONNECTING, server = server)
+            startRealService(prefs, server, epoch)
+            startWatchdog()
+        }
+    }
+
+    private fun startRealService(prefs: Prefs, target: ServerConfig, epoch: Long) {
+        val ctx = appContext ?: return
+        pendingServer = target
+        val intent = Intent(ctx, ManfazVpnService::class.java)
+            .setAction(ManfazVpnService.ACTION_START)
+            .putExtra(ManfazVpnService.EXTRA_EPOCH, epoch)
+            .putExtra(ManfazVpnService.EXTRA_SERVER, ServerCodec.toJson(target))
+            .putExtra(ManfazVpnService.EXTRA_KILL_SWITCH, prefs.killSwitch)
+            .putExtra(ManfazVpnService.EXTRA_DNS_PROTECT, prefs.dnsLeakProtection)
+            .putExtra(ManfazVpnService.EXTRA_IPV6_MODE, prefs.ipv6Mode.name)
+            .putExtra(ManfazVpnService.EXTRA_REMOTE_DNS, prefs.remoteDns)
+            .putExtra(ManfazVpnService.EXTRA_DNS_BOOTSTRAP, prefs.dnsBootstrap)
+            .putExtra(ManfazVpnService.EXTRA_MTU, prefs.mtu)
+            .putExtra(ManfazVpnService.EXTRA_ALLOW_LAN, prefs.allowLan)
+            .putExtra(ManfazVpnService.EXTRA_NOTIFY_SERVER, prefs.showServerInNotification)
+            .putExtra(ManfazVpnService.EXTRA_NOTIFY_SPEED, prefs.showSpeedInNotification)
+            .putExtra(ManfazVpnService.EXTRA_PERAPP_ENABLED, prefs.perAppEnabled)
+            .putExtra(ManfazVpnService.EXTRA_PERAPP_BYPASS, prefs.perAppBypassMode)
+            .putExtra(ManfazVpnService.EXTRA_PERAPP_LIST, prefs.perAppSet.toTypedArray())
+        startForeground(ctx, intent)
+    }
+
+    private fun startWatchdog() {
+        watchdog?.cancel()
+        watchdog = scope.launch {
+            delay(15_000)
+            if (_state.value.status == ConnStatus.CONNECTING) {
+                onCoreFailed("هسته پاسخ نداد. لطفاً دوباره تلاش کنید یا کانفیگ دیگری را امتحان کنید.")
+                appContext?.let { stopService(it) }
+            }
+        }
+    }
+
+    fun disconnect(context: Context) {
+        // Cancel any in-flight Cloudflare scan so it cannot start the VPN after we stop.
+        connectWanted = false
+        scanJob?.cancel(); scanJob = null
+        mockWorker?.cancel(); mockWorker = null
+        watchdog?.cancel(); watchdog = null
+        pendingServer = null
+        stopService(context.applicationContext)
+        _state.value = ConnectionState(status = ConnStatus.DISCONNECTED)
+    }
+
+    fun toggle(context: Context, server: ServerConfig?) {
+        when (_state.value.status) {
+            ConnStatus.CONNECTED, ConnStatus.CONNECTING, ConnStatus.SCANNING -> disconnect(context)
+            else -> server?.let { connect(context, it) }
+        }
+    }
+
+    // ---- Called (in UI process) by StateBridge when the core broadcasts ----
+    fun onCoreConnected(ip: String, ping: Int, server: ServerConfig? = null, since: Long = 0L) {
+        watchdog?.cancel(); watchdog = null
+        _state.update {
+            it.copy(
+                status = ConnStatus.CONNECTED,
+                server = server ?: it.server,
+                ip = ip,
+                pingMs = ping,
+                connectedSinceMs = since.takeIf { marker -> marker > 0L }
+                    ?: it.connectedSinceMs.takeIf { marker -> marker > 0L }
+                    ?: SystemClock.elapsedRealtime(),
+                error = null,
+            )
+        }
+    }
+
+    /** Restore authoritative core state after the UI process/activity was recreated. */
+    fun restoreFromSnapshot(context: Context) {
+        val snapshot = ConnectionSnapshotStore.read(context) ?: return
+        // A connected snapshot remains authoritative until the core explicitly writes
+        // STOPPED. Doze may delay heartbeats, but it does not mean the VPN disconnected.
+        if (snapshot.connected && snapshot.server != null) {
+            onCoreConnected(
+                ip = snapshot.ip,
+                ping = snapshot.ping,
+                server = snapshot.server,
+                since = snapshot.connectedSince,
+            )
+        } else if (!snapshot.connected && snapshot.isFresh &&
+            _state.value.status == ConnStatus.CONNECTED
+        ) {
+            onServiceStopped()
+        }
+    }
+
+    fun onCoreFailed(message: String) {
+        watchdog?.cancel(); watchdog = null
+        // If a clean-IP attempt failed, silently fall back to the original config once.
+        val ctx = appContext
+        val orig = originalServer
+        if (connectWanted && usedCleanIp && !triedOriginal && orig != null && ctx != null) {
+            triedOriginal = true
+            usedCleanIp = false
+            stopService(ctx)
+            _state.value = ConnectionState(status = ConnStatus.CONNECTING, server = orig)
+            startRealService(Prefs(ctx), orig, SystemClock.elapsedRealtimeNanos())
+            startWatchdog()
+            return
+        }
+        connectWanted = false
+        _state.update { it.copy(status = ConnStatus.FAILED, error = message) }
+    }
+
+    fun onIpInfo(ip: String, country: String) {
+        _state.update { if (it.status == ConnStatus.CONNECTED) it.copy(ip = ip, exitCountry = country) else it }
+    }
+
+    fun onTraffic(uploadDelta: Long, downloadDelta: Long) {
+        _state.update {
+            if (it.status != ConnStatus.CONNECTED) return
+            it.copy(
+                downloadSpeedBps = downloadDelta,
+                uploadSpeedBps = uploadDelta,
+                totalDownloaded = it.totalDownloaded + downloadDelta,
+                totalUploaded = it.totalUploaded + uploadDelta,
+            )
+        }
+    }
+
+    fun onServiceStopped() {
+        if (_state.value.status != ConnStatus.FAILED) {
+            connectWanted = false
+            _state.value = ConnectionState(status = ConnStatus.DISCONNECTED)
+        }
+    }
+
+    // ---- Simulated path for sample servers ----
+    private fun startMock(server: ServerConfig) {
+        mockWorker = scope.launch {
+            delay(1200)
+            _state.update {
+                it.copy(status = ConnStatus.CONNECTED, ip = fakeIp(),
+                    pingMs = server.pingMs ?: Random.nextInt(40, 160),
+                    connectedSinceMs = SystemClock.elapsedRealtime())
+            }
+            var down = 0L; var up = 0L
+            while (true) {
+                delay(1000)
+                val d = Random.nextLong(200_000, 3_500_000)
+                val u = Random.nextLong(60_000, 900_000)
+                down += d; up += u
+                _state.update {
+                    if (it.status != ConnStatus.CONNECTED) return@launch
+                    it.copy(downloadSpeedBps = d, uploadSpeedBps = u,
+                        totalDownloaded = down, totalUploaded = up,
+                        pingMs = (it.pingMs + Random.nextInt(-6, 7)).coerceIn(30, 260))
+                }
+            }
+        }
+    }
+
+    private fun startForeground(context: Context, intent: Intent) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent)
+        else context.startService(intent)
+    }
+
+    private fun stopService(context: Context) {
+        // Carry the current uptime marker so the service can drop any stale START
+        // (e.g. a scan-launched intent) that arrives after this STOP.
+        context.startService(
+            Intent(context, ManfazVpnService::class.java)
+                .setAction(ManfazVpnService.ACTION_STOP)
+                .putExtra(ManfazVpnService.EXTRA_EPOCH, SystemClock.elapsedRealtimeNanos())
+        )
+    }
+
+    private fun fakeIp() = "${Random.nextInt(11, 223)}.${Random.nextInt(0, 255)}." +
+        "${Random.nextInt(0, 255)}.${Random.nextInt(1, 254)}"
+}

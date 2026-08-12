@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="widget_surface">#FF151310</color>
+    <color name="widget_border">#55A86B42</color>
+    <color name="widget_title">#FFF7F1EC</color>
+    <color name="widget_subtitle">#FFB9AAA0</color>
+    <color name="widget_switch_on_text">#FFFFFFFF</color>
+    <color name="widget_switch_off_text">#FFFFA165</color>
+    <color name="widget_switch_off_surface">#FF2A211B</color>
+    <color name="widget_switch_off_stroke">#88D77739</color>
+</resources>

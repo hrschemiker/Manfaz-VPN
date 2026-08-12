@@ -1,0 +1,10 @@
+/.gradle/
+/.gradle-user/
+/.kotlin/
+/**/build/
+/local.properties
+/signing/
+/work/
+build_output.log
+*.jks
+*.keystore
