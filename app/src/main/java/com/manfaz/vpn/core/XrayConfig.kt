@@ -22,6 +22,7 @@ object XrayConfig {
     fun build(
         server: ServerConfig,
         remoteDns: String = "1.1.1.1",
+        dnsBootstrap: String = "1.1.1.1",
         dnsLeakProtection: Boolean = false,
         allowLan: Boolean = true,
         ipv6Mode: Ipv6Mode = Ipv6Mode.DIRECT,
@@ -77,9 +78,15 @@ object XrayConfig {
 
         // DNS: resolve through the proxy (remote resolver)
         val dnsServers = JSONArray().put(remoteDns)
-        root.put("dns", JSONObject()
+        val dns = JSONObject()
             .put("servers", dnsServers)
-            .put("queryStrategy", if (ipv6Mode == Ipv6Mode.BLOCK) "UseIPv4" else "UseIP"))
+            .put("queryStrategy", if (ipv6Mode == Ipv6Mode.BLOCK) "UseIPv4" else "UseIP")
+        // A DoH hostname must not depend on the very same resolver it is trying to reach.
+        // Pin only its resolver host to the user-selected numeric bootstrap address.
+        runCatching { java.net.URI(remoteDns) }.getOrNull()
+            ?.takeIf { it.scheme.equals("https", true) && !it.host.isNullOrBlank() }
+            ?.let { dns.put("hosts", JSONObject().put(it.host, dnsBootstrap)) }
+        root.put("dns", dns)
 
         return root.toString()
     }

@@ -24,6 +24,7 @@ import com.manfaz.vpn.core.ServerCodec
 import com.manfaz.vpn.core.XrayConfig
 import com.manfaz.vpn.data.Ipv6Mode
 import com.manfaz.vpn.core.XrayCore
+import com.manfaz.vpn.net.ProxyHealthProbe
 import com.manfaz.vpn.ui.MainActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -65,6 +66,10 @@ class ManfazVpnService : VpnService() {
         private const val NOTIF_CONNECTING = "connecting"
         private const val NOTIF_CONNECTED = "connected"
         private const val NOTIF_HOLDING = "holding"
+        private const val HEALTH_INITIAL_DELAY_MS = 45_000L
+        private const val HEALTH_INTERVAL_MS = 45_000L
+        private const val HEALTH_FAILURE_THRESHOLD = 3
+        private const val HEALTH_RECOVERY_COOLDOWN_MS = 5 * 60_000L
     }
 
     private var tun: ParcelFileDescriptor? = null
@@ -72,6 +77,7 @@ class ManfazVpnService : VpnService() {
     private val scope = CoroutineScope(serviceJob + Dispatchers.IO)
     private var connectJob: Job? = null
     private var statsJob: Job? = null
+    private var healthJob: Job? = null
     private var upstreamMonitor: UpstreamNetworkMonitor? = null
     private var lastStartIntent: Intent? = null
     @Volatile private var reloadingUpstream = false
@@ -85,6 +91,9 @@ class ManfazVpnService : VpnService() {
     @Volatile private var lastHeartbeatAt: Long = 0L
     @Volatile private var notifState = NOTIF_CONNECTING
     @Volatile private var lastEpoch = 0L
+    @Volatile private var activeMtu = HevTunnel.DEFAULT_MTU
+    @Volatile private var consecutiveHealthFailures = 0
+    @Volatile private var lastHealthRecoveryAt = 0L
 
     private val stateQueryReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -185,6 +194,7 @@ class ManfazVpnService : VpnService() {
                 validateDns(remoteDns, dnsBootstrap)
                 val config = XrayConfig.build(
                     server, remoteDns = remoteDns,
+                    dnsBootstrap = dnsBootstrap,
                     dnsLeakProtection = dnsProtect, allowLan = allowLan, ipv6Mode = ipv6Mode,
                 )
 
@@ -211,6 +221,7 @@ class ManfazVpnService : VpnService() {
                 val pfd = builder.establish()
                     ?: throw IllegalStateException("VPN permission is required.")
                 tun = pfd
+                activeMtu = mtu
 
                 com.manfaz.vpn.util.LogBuffer.log(this@ManfazVpnService, "connect", "starting ${server.displayLabel} (${server.protocol.label})")
                 // 1) Start Xray core with the SOCKS inbound (tunFd=0 — hev drives the TUN)
@@ -237,6 +248,7 @@ class ManfazVpnService : VpnService() {
                 )
                 com.manfaz.vpn.widget.ManfazWidget.updateAll(this@ManfazVpnService, true, server)
                 startStatsPolling()
+                startHealthMonitoring()
                 // C#9: fetch the real exit IP + country through the proxy
                 launch {
                     com.manfaz.vpn.net.ExitIp.fetch(XrayConfig.SOCKS_PORT)?.let {
@@ -284,10 +296,16 @@ class ManfazVpnService : VpnService() {
                     Ipv6Mode.valueOf(intent.getStringExtra(EXTRA_IPV6_MODE) ?: Ipv6Mode.DIRECT.name)
                 }.getOrDefault(Ipv6Mode.DIRECT)
                 val remoteDns = intent.getStringExtra(EXTRA_REMOTE_DNS) ?: "1.1.1.1"
+                val dnsBootstrap = intent.getStringExtra(EXTRA_DNS_BOOTSTRAP) ?: "1.1.1.1"
                 val allowLan = intent.getBooleanExtra(EXTRA_ALLOW_LAN, true)
-                val requestedMtu = intent.getIntExtra(EXTRA_MTU, 0)
-                val mtu = if (requestedMtu == 0) autoMtu() else requestedMtu.coerceIn(1280, 1500)
-                val config = XrayConfig.build(server, remoteDns, dnsProtect, allowLan, ipv6Mode)
+                val config = XrayConfig.build(
+                    server,
+                    remoteDns = remoteDns,
+                    dnsBootstrap = dnsBootstrap,
+                    dnsLeakProtection = dnsProtect,
+                    allowLan = allowLan,
+                    ipv6Mode = ipv6Mode,
+                )
 
                 statsJob?.cancel(); statsJob = null
                 HevTunnel.stop()
@@ -296,7 +314,7 @@ class ManfazVpnService : VpnService() {
                     Log.i(TAG, "core handover status $code: $msg")
                 }
                 HevTunnel.start(
-                    this@ManfazVpnService, pfd.fd, XrayConfig.SOCKS_PORT, mtu,
+                    this@ManfazVpnService, pfd.fd, XrayConfig.SOCKS_PORT, activeMtu,
                     tunnelIpv6 = ipv6Mode == Ipv6Mode.TUNNEL,
                 )
                 startStatsPolling()
@@ -308,7 +326,11 @@ class ManfazVpnService : VpnService() {
                 Log.e(TAG, "upstream handover reload failed", it)
                 // The TUN is intentionally kept alive during reload. If recovery fails, tear it
                 // down explicitly so UI, notification and Android's VPN icon never disagree.
-                teardown()
+                teardown(notifyStopped = false)
+                StateBridge.sendFailed(
+                    this@ManfazVpnService,
+                    "بازیابی اتصال ناموفق بود؛ سرور جایگزین بررسی می‌شود.",
+                )
                 stopSelf()
             }
             reloadingUpstream = false
@@ -366,7 +388,16 @@ class ManfazVpnService : VpnService() {
 
     private fun autoMtu(): Int {
         val connectivity = getSystemService(android.net.ConnectivityManager::class.java)
-        val caps = connectivity.getNetworkCapabilities(connectivity.activeNetwork)
+        // Once a VPN is active, activeNetwork may be the VPN itself. Prefer a validated,
+        // non-VPN physical network so reconnects do not accidentally switch cellular MTU
+        // back to the Wi-Fi default.
+        val physical = connectivity.allNetworks.firstOrNull { network ->
+            connectivity.getNetworkCapabilities(network)?.let { caps ->
+                caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED) &&
+                    caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+            } == true
+        }
+        val caps = connectivity.getNetworkCapabilities(physical ?: connectivity.activeNetwork)
         return if (caps?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) == true) 1400 else 1500
     }
 
@@ -392,6 +423,43 @@ class ManfazVpnService : VpnService() {
         }
     }
 
+    /**
+     * Detects silent half-open tunnels (VPN icon is present but traffic no longer passes).
+     * Three consecutive end-to-end failures are required and automatic recovery is rate
+     * limited, so a blocked connectivity-check provider cannot create a reconnect loop.
+     */
+    private fun startHealthMonitoring() {
+        healthJob?.cancel()
+        consecutiveHealthFailures = 0
+        healthJob = scope.launch {
+            delay(HEALTH_INITIAL_DELAY_MS)
+            while (isActive) {
+                if (!reloadingUpstream && tun != null && XrayCore.isRunning) {
+                    val healthy = ProxyHealthProbe.isHealthy(XrayConfig.SOCKS_PORT)
+                    if (healthy) {
+                        consecutiveHealthFailures = 0
+                    } else {
+                        consecutiveHealthFailures++
+                        val now = SystemClock.elapsedRealtime()
+                        if (consecutiveHealthFailures >= HEALTH_FAILURE_THRESHOLD &&
+                            now - lastHealthRecoveryAt >= HEALTH_RECOVERY_COOLDOWN_MS
+                        ) {
+                            consecutiveHealthFailures = 0
+                            lastHealthRecoveryAt = now
+                            com.manfaz.vpn.util.LogBuffer.log(
+                                this@ManfazVpnService,
+                                "health",
+                                "end-to-end probe failed repeatedly; recovering proxy",
+                            )
+                            reloadForUpstreamHandover()
+                        }
+                    }
+                }
+                delay(HEALTH_INTERVAL_MS)
+            }
+        }
+    }
+
     private fun sendAuthoritativeState() {
         val server = activeServer
         if (tun != null && XrayCore.isRunning && server != null && connectedSince > 0L) {
@@ -410,9 +478,10 @@ class ManfazVpnService : VpnService() {
         return String.format(java.util.Locale.US, "%.1f %s", v, u[i])
     }
 
-    private fun teardown() {
+    private fun teardown(notifyStopped: Boolean = true) {
         val lastServer = activeServer
         statsJob?.cancel(); statsJob = null
+        healthJob?.cancel(); healthJob = null
         HevTunnel.stop()
         XrayCore.stop()
         try { tun?.close() } catch (_: Exception) {}
@@ -422,12 +491,14 @@ class ManfazVpnService : VpnService() {
         lastHeartbeatAt = 0L
         lastStartIntent = null
         reloadingUpstream = false
+        consecutiveHealthFailures = 0
+        activeMtu = HevTunnel.DEFAULT_MTU
         notifState = NOTIF_CONNECTING
         stopForegroundCompat()
         runCatching { getSystemService(NotificationManager::class.java).cancel(NOTIF_ID) }
         com.manfaz.vpn.widget.ManfazWidget.updateAll(this, false, lastServer)
         ConnectionSnapshotStore.writeStopped(this)
-        StateBridge.sendStopped(this)
+        if (notifyStopped) StateBridge.sendStopped(this)
     }
 
     private fun friendlyError(e: Throwable): String {
@@ -490,4 +561,5 @@ class ManfazVpnService : VpnService() {
         serviceJob.cancel()
         super.onDestroy()
     }
+
 }

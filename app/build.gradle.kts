@@ -22,8 +22,8 @@ android {
         applicationId = "com.manfaz.vpn"
         minSdk = 26
         targetSdk = 35
-        versionCode = 14
-        versionName = "1.8.0"
+        versionCode = 15
+        versionName = "1.9.0"
         vectorDrawables { useSupportLibrary = true }
         resourceConfigurations += listOf("fa", "en")
     }

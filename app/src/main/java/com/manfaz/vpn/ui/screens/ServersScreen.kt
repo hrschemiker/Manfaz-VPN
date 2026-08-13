@@ -421,15 +421,20 @@ private fun CountryServerCard(
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
-                            if (ping != null) "$ping ms".toFarsiDigits() else "—",
+                            when {
+                                ping != null -> "$ping ms".toFarsiDigits()
+                                server.latencyTested -> "ناموفق"
+                                else -> "—"
+                            },
                             color = when {
+                                ping == null && server.latencyTested -> FailedRed
                                 ping == null -> muted
                                 ping < 100 -> ConnectedGreen
                                 ping < 180 -> BrandAmber
                                 else -> FailedRed
                             },
                             fontWeight = FontWeight.Black,
-                            fontSize = 11.sp,
+                            fontSize = if (ping == null && server.latencyTested) 9.sp else 11.sp,
                         )
                     }
                     IconButton(onClick = onFavorite, modifier = Modifier.size(26.dp)) {

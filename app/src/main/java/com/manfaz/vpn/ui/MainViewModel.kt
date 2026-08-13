@@ -235,18 +235,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             _testing.value = true
             try {
                 coroutineScope {
-                    // Current AndroidLibXrayLite isolates each outbound test; bounded parallelism
-                    // keeps a slow endpoint from serially blocking the entire server list.
-                    val gate = Semaphore(8)
+                    // Each probe starts an isolated native Xray instance. A high fan-out can
+                    // starve DNS/CPU on mid-range phones and turn healthy servers into false
+                    // timeouts. Three workers is fast enough while matching production limits.
+                    val gate = Semaphore(3)
                     val results = list.map { server ->
                         async(Dispatchers.IO) {
                             val latency = gate.withPermit {
                                 if (!XrayConfig.isSupportedByXray(server.protocol)) return@withPermit null
-                                XrayCore.measureDelay(
+                                XrayCore.measureDelayResilient(
                                     app,
                                     XrayConfig.build(
                                         server = server,
                                         remoteDns = prefs.remoteDns,
+                                        dnsBootstrap = prefs.dnsBootstrap,
                                         dnsLeakProtection = prefs.dnsLeakProtection,
                                         allowLan = prefs.allowLan,
                                         ipv6Mode = prefs.ipv6Mode,

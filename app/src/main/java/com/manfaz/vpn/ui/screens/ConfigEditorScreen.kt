@@ -72,6 +72,7 @@ fun ConfigEditorScreen(vm: MainViewModel, serverId: String, onDone: () -> Unit) 
                     uuid = if (original.uuid.isNotBlank()) cred.trim() else original.uuid,
                     password = if (original.uuid.isBlank()) cred.trim() else original.password,
                     pingMs = null, // params changed → re-test
+                    latencyTested = false,
                 )
                 ServerRepository.update(updated)
                 onDone()

@@ -18,6 +18,7 @@ class UpstreamNetworkMonitor(
     private val onHandover: () -> Unit,
 ) {
     private var upstream: Network? = null
+    private val candidates = LinkedHashMap<Network, NetworkCapabilities>()
     private var handoverJob: Job? = null
     private var registered = false
 
@@ -29,20 +30,26 @@ class UpstreamNetworkMonitor(
 
     private val callback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
-            val previous = upstream
-            upstream = network
-            onNetworksChanged(arrayOf(network))
-            if (previous != null && previous != network) scheduleHandover()
+            // Availability alone does not mean the network has working internet. Selection is
+            // deferred until capabilities report VALIDATED, avoiding reloads into captive or
+            // half-configured Wi-Fi during a mobile/Wi-Fi handover.
+            connectivity.getNetworkCapabilities(network)?.let { caps ->
+                candidates[network] = caps
+                chooseValidatedUpstream()
+            }
         }
 
         override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
-            if (network == upstream) onNetworksChanged(arrayOf(network))
+            candidates[network] = caps
+            chooseValidatedUpstream()
         }
 
         override fun onLost(network: Network) {
+            candidates.remove(network)
             if (network == upstream) {
                 upstream = null
-                onNetworksChanged(null)
+                chooseValidatedUpstream()
+                if (upstream != null) scheduleHandover()
             }
         }
     }
@@ -56,10 +63,30 @@ class UpstreamNetworkMonitor(
 
     fun unregister() {
         handoverJob?.cancel(); handoverJob = null
+        candidates.clear()
         upstream = null
         if (!registered) return
         registered = false
         runCatching { connectivity.unregisterNetworkCallback(callback) }
+    }
+
+    private fun chooseValidatedUpstream() {
+        val selected = candidates.entries.firstOrNull { (_, caps) ->
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) &&
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+        }?.key
+
+        val previous = upstream
+        if (selected == previous) {
+            selected?.let { onNetworksChanged(arrayOf(it)) }
+            return
+        }
+        upstream = selected
+        onNetworksChanged(selected?.let { arrayOf(it) })
+        // Losing the old network before the replacement validates is common. Reload only when
+        // a usable replacement exists; otherwise the established TUN remains intact and waits.
+        if (previous != null && selected != null) scheduleHandover()
     }
 
     private fun scheduleHandover() {

@@ -14,7 +14,9 @@ class XrayConfigTest {
     fun delayProbeHasIndependentFallbackEndpoint() {
         assertTrue(XrayCore.DELAY_TEST_URLS.size >= 2)
         assertEquals(XrayCore.DELAY_TEST_URLS.size, XrayCore.DELAY_TEST_URLS.distinct().size)
-        assertTrue(XrayCore.DELAY_TEST_URLS.all { it.startsWith("https://") })
+        assertTrue(XrayCore.DELAY_TEST_URLS.all {
+            it.startsWith("https://") || it.startsWith("http://")
+        })
     }
     private val server = ServerConfig(
         name = "Test",
@@ -46,6 +48,26 @@ class XrayConfigTest {
         assertTrue(
             root.getJSONArray("inbounds").getJSONObject(0)
                 .getJSONObject("sniffing").getBoolean("routeOnly"),
+        )
+    }
+
+    @Test
+    fun dohResolverUsesNumericBootstrapWithoutChangingOtherDns() {
+        val root = JSONObject(
+            XrayConfig.build(
+                server,
+                remoteDns = "https://dns.example/dns-query",
+                dnsBootstrap = "9.9.9.9",
+                dnsLeakProtection = true,
+            ),
+        )
+        val dns = root.getJSONObject("dns")
+        assertEquals("https://dns.example/dns-query", dns.getJSONArray("servers").getString(0))
+        assertEquals("9.9.9.9", dns.getJSONObject("hosts").getString("dns.example"))
+        assertEquals(
+            "dns-out",
+            root.getJSONObject("routing").getJSONArray("rules")
+                .getJSONObject(0).getString("outboundTag"),
         )
     }
 

@@ -73,7 +73,8 @@ class Persistence(context: Context) {
         put("flow", s.flow); put("alpn", s.alpn)
         put("fingerprint", s.fingerprint); put("publicKey", s.publicKey)
         put("shortId", s.shortId); put("group", s.group); put("favorite", s.favorite)
-        put("pingMs", s.pingMs ?: JSONObject.NULL); put("noPingSinceMs", s.noPingSinceMs)
+        put("pingMs", s.pingMs ?: JSONObject.NULL); put("latencyTested", s.latencyTested)
+        put("noPingSinceMs", s.noPingSinceMs)
         put("rawUri", s.rawUri)
     }
 
@@ -103,6 +104,7 @@ class Persistence(context: Context) {
         group = o.optString("group"),
         favorite = o.optBoolean("favorite"),
         pingMs = if (o.isNull("pingMs")) null else o.optInt("pingMs"),
+        latencyTested = o.optBoolean("latencyTested", !o.isNull("pingMs")),
         noPingSinceMs = o.optLong("noPingSinceMs"),
         rawUri = o.optString("rawUri"),
     )

@@ -52,7 +52,12 @@ object ServerRepository {
                 // Reuse the previous id at most once — duplicated lines in the fresh payload
                 // must not collide on a LazyColumn key.
                 if (prev != null && usedIds.add(prev.id)) {
-                    s.copy(id = prev.id, favorite = prev.favorite, pingMs = prev.pingMs)
+                    s.copy(
+                        id = prev.id,
+                        favorite = prev.favorite,
+                        pingMs = prev.pingMs,
+                        latencyTested = prev.latencyTested,
+                    )
                 } else {
                     s
                 }
@@ -77,7 +82,9 @@ object ServerRepository {
     }
 
     fun updatePing(id: String, ping: Int?) {
-        _servers.update { list -> list.map { if (it.id == id) it.copy(pingMs = ping) else it } }
+        _servers.update { list ->
+            list.map { if (it.id == id) it.copy(pingMs = ping, latencyTested = true) else it }
+        }
         persist()
     }
 
@@ -86,7 +93,9 @@ object ServerRepository {
         if (results.isEmpty()) return
         _servers.update { list ->
             list.map { server ->
-                if (results.containsKey(server.id)) server.copy(pingMs = results[server.id]) else server
+                if (results.containsKey(server.id)) {
+                    server.copy(pingMs = results[server.id], latencyTested = true)
+                } else server
             }
         }
         persist()

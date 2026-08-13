@@ -30,6 +30,7 @@ object XrayCore {
     val DELAY_TEST_URLS = listOf(
         "https://cp.cloudflare.com/generate_204",
         "https://www.gstatic.com/generate_204",
+        "http://www.msftconnecttest.com/connecttest.txt",
     )
     // Returns ~2 KB of real body → a success proves data actually downloads through the config.
     const val DOWNLOAD_TEST_URL = "https://speed.cloudflare.com/__down?bytes=2000"
@@ -54,6 +55,34 @@ object XrayCore {
         return null
     }
 
+    /**
+     * A conservative multi-pass probe for unreliable mobile networks. Every pass uses a
+     * different connectivity provider, so a provider-specific block is not mistaken for a
+     * dead proxy. Keeping retries here also gives the native core a short recovery window
+     * after a previous temporary instance has shut down.
+     */
+    fun measureDelayResilient(
+        context: Context,
+        configContent: String,
+        urls: List<String> = DELAY_TEST_URLS,
+        pauseBetweenAttemptsMs: Long = 250L,
+    ): Int? {
+        if (urls.isEmpty()) return null
+        initEnv(context)
+        urls.distinct().forEachIndexed { index, url ->
+            measureDelayOnce(configContent, url)?.let { return it }
+            if (index != urls.lastIndex && pauseBetweenAttemptsMs > 0L) {
+                try {
+                    Thread.sleep(pauseBetweenAttemptsMs)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return null
+                }
+            }
+        }
+        return null
+    }
+
     fun measureDelay(context: Context, configContent: String, url: String): Int? {
         return measureDelay(context, configContent, listOf(url))
     }
@@ -69,6 +98,7 @@ object XrayCore {
     }
 
     /** Copy bundled geoip/geosite from assets to filesDir and initialize the core env. */
+    @Synchronized
     fun initEnv(context: Context) {
         if (initialized) return
         val dir = context.filesDir

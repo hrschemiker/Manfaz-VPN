@@ -31,10 +31,11 @@ The application is designed for real mobile conditions: process recreation, back
 
 - VLESS, VMess, Trojan, Shadowsocks, SOCKS5, and HTTP through Xray
 - Native Android `VpnService` integration with an isolated core process
-- Real HTTP-through-proxy latency checks with independent fallback endpoints—not synthetic numbers
+- Queue-controlled HTTP-through-proxy latency checks with independent provider fallbacks—not synthetic numbers
 - Automatic failover, fastest-server selection, and last-server reconnect
 - Connection state recovery after the UI process returns from the background
-- Seamless Wi-Fi/mobile handover with in-place proxy-core recovery
+- Validated Wi-Fi/mobile handover with in-place proxy-core recovery
+- Conservative end-to-end health monitoring with multi-failure recovery and reconnect-loop protection
 - Quick Settings tile, launcher shortcuts, persistent notification, and home-screen widget
 
 ### Import and subscriptions

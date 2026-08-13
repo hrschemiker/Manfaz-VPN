@@ -43,6 +43,7 @@ data class ServerConfig(
     val group: String = "",          // subscription / manual group
     val favorite: Boolean = false,
     val pingMs: Int? = null,         // last measured delay, null = untested/unreachable
+    val latencyTested: Boolean = false, // distinguishes an actual failed probe from never tested
     val noPingSinceMs: Long = 0L,    // epoch millis since it first had no ping (free configs); 0 = ok
     val rawUri: String = "",
 ) {
