@@ -2,6 +2,11 @@ name: Release
 
 # Publishes the downloadable APKs. Push a tag such as `v2.0.0`, or run the workflow
 # manually and type the tag, and the per-ABI APKs are attached to a GitHub Release.
+#
+# Signing: set the four repository secrets below and the APKs are signed with the
+# project's own key, exactly like a local `assembleRelease`. Without them the workflow
+# still publishes, but the APKs are unsigned — Android will refuse to install those, so
+# the release is marked as a pre-release and says so.
 on:
   push:
     tags:
@@ -47,8 +52,6 @@ jobs:
       - name: Run unit tests
         run: ./gradlew --no-daemon testReleaseUnitTest
 
-      # With the four repository secrets set the APKs are signed with the project's own
-      # key; without them the workflow still publishes unsigned-release APKs.
       - name: Restore signing key
         if: env.KEYSTORE_BASE64 != ''
         env:
@@ -68,24 +71,58 @@ jobs:
         run: ./gradlew --no-daemon assembleRelease
 
       - name: Collect APKs
+        id: collect
         run: |
           set -euo pipefail
           mkdir -p dist
+          signed=true
           for apk in app/build/outputs/apk/release/*.apk; do
             [ -e "$apk" ] || continue
             base="$(basename "$apk" .apk)"
+            case "$base" in *-unsigned) signed=false ;; esac
             abi="$(echo "$base" | sed -E 's/^app-//; s/-release(-unsigned)?$//')"
-            cp "$apk" "dist/manfaz-${RELEASE_TAG}-${abi}.apk"
+            suffix=""
+            [ "$signed" = true ] || suffix="-unsigned"
+            cp "$apk" "dist/manfaz-${RELEASE_TAG}-${abi}${suffix}.apk"
           done
           ls -l dist
           (cd dist && sha256sum ./*.apk > SHA256SUMS.txt)
+          echo "signed=$signed" >> "$GITHUB_OUTPUT"
+
+      - name: Write the installation notice
+        run: |
+          if [ "${{ steps.collect.outputs.signed }}" = "true" ]; then
+            cat > NOTES.md <<'EOF'
+          Most modern Android phones use **arm64-v8a**. Use **armeabi-v7a** only for older
+          32-bit devices. `SHA256SUMS.txt` lists the checksum of every file.
+          EOF
+          else
+            cat > NOTES.md <<'EOF'
+          > **These APKs are unsigned and Android will refuse to install them.**
+          >
+          > No signing key is configured for this repository, so the build could not sign
+          > them. To publish installable APKs, add the app's keystore as the repository
+          > secrets `KEYSTORE_BASE64` (the `.jks` file, base64-encoded), `KEYSTORE_PASSWORD`,
+          > `KEY_ALIAS` and `KEY_PASSWORD`, then re-run the **Release** workflow for this tag.
+          > Using the project's existing key also keeps updates installable over an existing
+          > installation.
+
+          Most modern Android phones use **arm64-v8a**. Use **armeabi-v7a** only for older
+          32-bit devices. `SHA256SUMS.txt` lists the checksum of every file.
+          EOF
+          fi
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           name: Manfaz VPN ${{ env.RELEASE_TAG }}
+          body_path: NOTES.md
+          append_body: true
           generate_release_notes: true
+          # An unsigned build is not something anyone can install, so it must not sit at
+          # the top of the releases page as if it were the current download.
+          prerelease: ${{ steps.collect.outputs.signed != 'true' }}
           files: |
             dist/*.apk
             dist/SHA256SUMS.txt
