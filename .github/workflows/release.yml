@@ -96,6 +96,11 @@ jobs:
         run: |
           if [ "${{ steps.collect.outputs.signed }}" = "true" ]; then
             cat > NOTES.md <<'EOF'
+          > **Coming from 1.9.0 or earlier?** Uninstall the old app first, then install this
+          > one. The signing key changed in 2.0.0, and Android will not install a differently
+          > signed build over an existing one. Back up your servers from
+          > **Settings -> Secure backup** before uninstalling.
+
           Most modern Android phones use **arm64-v8a**. Use **armeabi-v7a** only for older
           32-bit devices. `SHA256SUMS.txt` lists the checksum of every file.
           EOF
@@ -110,6 +115,20 @@ jobs:
           Most modern Android phones use **arm64-v8a**. Use **armeabi-v7a** only for older
           32-bit devices. `SHA256SUMS.txt` lists the checksum of every file.
           EOF
+          fi
+
+      # Re-running a tag would otherwise leave the previous run's files sitting next to
+      # the new ones — including unsigned APKs from a run made before the key existed.
+      - name: Remove assets from an earlier run of this tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | while read -r asset; do
+              [ -n "$asset" ] || continue
+              echo "deleting stale asset: $asset"
+              gh release delete-asset "$RELEASE_TAG" "$asset" --yes
+            done
           fi
 
       - name: Publish release
