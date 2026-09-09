@@ -8,8 +8,20 @@ enum class Ipv6Mode { BLOCK, TUNNEL, DIRECT }
 enum class NetworkAction { NONE, CONNECT, DISCONNECT, FASTEST }
 
 /**
+ * TLS ClientHello fragmentation, the most effective countermeasure against SNI-based
+ * DPI blocking on Iranian networks.
+ *
+ * - [OFF]        never fragment.
+ * - [AUTO]       fragment plain-TLS handshakes only; REALITY already hides its SNI.
+ * - [ALWAYS]     fragment every TLS-like handshake, REALITY included.
+ * - [AGGRESSIVE] tiny packets plus padding noise, for the hardest filtering conditions.
+ */
+enum class FragmentMode { OFF, AUTO, ALWAYS, AGGRESSIVE }
+
+/**
  * Simple SharedPreferences-backed settings, read in the UI process and passed to the
- * ":core" VPN service via intent extras (multi-process SharedPreferences is unreliable).
+ * ":core" VPN service via a single intent extra (multi-process SharedPreferences is
+ * unreliable, so the values are snapshotted at connect time).
  */
 class Prefs(context: Context) {
     private val sp = context.applicationContext.getSharedPreferences("manfaz_prefs", Context.MODE_PRIVATE)
@@ -18,29 +30,30 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KILL_SWITCH, false)
         set(v) = sp.edit().putBoolean(KILL_SWITCH, v).apply()
 
+    /**
+     * DNS leak protection defaults to ON: on Iranian networks a plain resolver is both a
+     * privacy leak and the single most common cause of DNS poisoning.
+     */
     var dnsLeakProtection: Boolean
-        get() = sp.getBoolean(DNS_PROTECT, false)
+        get() = sp.getBoolean(DNS_PROTECT, true)
         set(v) = sp.edit().putBoolean(DNS_PROTECT, v).apply()
 
-    var blockIpv6: Boolean
-        get() = sp.getBoolean(BLOCK_IPV6, false)
-        set(v) = sp.edit().putBoolean(BLOCK_IPV6, v).apply()
-
+    /**
+     * IPv6 defaults to BLOCK: most Iranian mobile carriers hand out an IPv6 address whose
+     * traffic never reaches the proxy, so leaving it enabled looks like a dead connection.
+     */
     var ipv6Mode: Ipv6Mode
-        get() {
-            val fallback = if (blockIpv6) Ipv6Mode.BLOCK else Ipv6Mode.DIRECT
-            return runCatching {
-                Ipv6Mode.valueOf(sp.getString(IPV6_MODE, fallback.name) ?: fallback.name)
-            }.getOrDefault(fallback)
-        }
+        get() = runCatching {
+            Ipv6Mode.valueOf(sp.getString(IPV6_MODE, Ipv6Mode.BLOCK.name) ?: Ipv6Mode.BLOCK.name)
+        }.getOrDefault(Ipv6Mode.BLOCK)
         set(v) = sp.edit().putString(IPV6_MODE, v.name).apply()
 
     var remoteDns: String
-        get() = sp.getString(REMOTE_DNS, "1.1.1.1") ?: "1.1.1.1"
+        get() = sp.getString(REMOTE_DNS, DEFAULT_REMOTE_DNS) ?: DEFAULT_REMOTE_DNS
         set(v) = sp.edit().putString(REMOTE_DNS, v).apply()
 
     var dnsBootstrap: String
-        get() = sp.getString(DNS_BOOTSTRAP, "1.1.1.1") ?: "1.1.1.1"
+        get() = sp.getString(DNS_BOOTSTRAP, DEFAULT_DNS_BOOTSTRAP) ?: DEFAULT_DNS_BOOTSTRAP
         set(v) = sp.edit().putString(DNS_BOOTSTRAP, v).apply()
 
     var mtu: Int
@@ -50,6 +63,34 @@ class Prefs(context: Context) {
     var allowLan: Boolean
         get() = sp.getBoolean(ALLOW_LAN, true)
         set(v) = sp.edit().putBoolean(ALLOW_LAN, v).apply()
+
+    // ---- Censorship-circumvention tuning ----
+
+    var fragmentMode: FragmentMode
+        get() = runCatching {
+            FragmentMode.valueOf(sp.getString(FRAGMENT_MODE, FragmentMode.AUTO.name) ?: FragmentMode.AUTO.name)
+        }.getOrDefault(FragmentMode.AUTO)
+        set(v) = sp.edit().putString(FRAGMENT_MODE, v.name).apply()
+
+    /** uTLS ClientHello fingerprint used when a config does not pin one itself. */
+    var tlsFingerprint: String
+        get() = sp.getString(TLS_FINGERPRINT, "chrome") ?: "chrome"
+        set(v) = sp.edit().putString(TLS_FINGERPRINT, v).apply()
+
+    /** Mux.Cool: fewer TCP handshakes and UDP-over-TCP, at the cost of some throughput. */
+    var muxEnabled: Boolean
+        get() = sp.getBoolean(MUX_ENABLED, false)
+        set(v) = sp.edit().putBoolean(MUX_ENABLED, v).apply()
+
+    /** Keep Iranian sites (`.ir` and known domestic services) outside the tunnel. */
+    var iranDirect: Boolean
+        get() = sp.getBoolean(IRAN_DIRECT, true)
+        set(v) = sp.edit().putBoolean(IRAN_DIRECT, v).apply()
+
+    /** Block QUIC so browsers fall back to TCP+TLS, which the tunnel carries far better. */
+    var blockQuic: Boolean
+        get() = sp.getBoolean(BLOCK_QUIC, true)
+        set(v) = sp.edit().putBoolean(BLOCK_QUIC, v).apply()
 
     var autoFailover: Boolean
         get() = sp.getBoolean(AUTO_FAILOVER, false)
@@ -86,7 +127,7 @@ class Prefs(context: Context) {
         perAppSet = cur
     }
 
-    // ---- Group C: connection UX ----
+    // ---- Connection UX ----
     var lastServerId: String
         get() = sp.getString(LAST_SERVER, "") ?: ""
         set(v) = sp.edit().putString(LAST_SERVER, v).apply()
@@ -128,27 +169,6 @@ class Prefs(context: Context) {
         get() = sp.getInt(SUB_HOURS, 12)
         set(v) = sp.edit().putInt(SUB_HOURS, v).apply()
 
-    var lastFreeFetch: Long
-        get() = sp.getLong(FREE_FETCH, 0L)
-        set(v) = sp.edit().putLong(FREE_FETCH, v).apply()
-
-    var freeWarningDismissed: Boolean
-        get() = sp.getBoolean(FREE_WARN, false)
-        set(v) = sp.edit().putBoolean(FREE_WARN, v).apply()
-
-    var freeConfigsUnlocked: Boolean
-        get() = sp.getBoolean(FREE_UNLOCKED, false)
-        set(v) = sp.edit().putBoolean(FREE_UNLOCKED, v).apply()
-
-    fun freeChannelCheckpoint(channel: String): Long =
-        sp.getLong("$FREE_CHANNEL_PREFIX$channel", 0L)
-
-    fun setFreeChannelCheckpoint(channel: String, postId: Long) {
-        if (postId > freeChannelCheckpoint(channel)) {
-            sp.edit().putLong("$FREE_CHANNEL_PREFIX$channel", postId).apply()
-        }
-    }
-
     // Appearance
     var themeMode: String   // SYSTEM | LIGHT | DARK | AMOLED
         get() = sp.getString(THEME_MODE, "SYSTEM") ?: "SYSTEM"
@@ -188,7 +208,21 @@ class Prefs(context: Context) {
         e.commit()
     }
 
+    /** Drops settings that belonged to features removed from the app. */
+    fun pruneObsoleteKeys() {
+        val obsolete = sp.all.keys.filter { key ->
+            key.startsWith("free_") || key in OBSOLETE_KEYS
+        }
+        if (obsolete.isEmpty()) return
+        val e = sp.edit()
+        obsolete.forEach(e::remove)
+        e.apply()
+    }
+
     companion object {
+        const val DEFAULT_REMOTE_DNS = "https://cloudflare-dns.com/dns-query"
+        const val DEFAULT_DNS_BOOTSTRAP = "1.1.1.1"
+
         private const val LAST_SERVER = "last_server_id"
         private const val AUTO_ON_OPEN = "auto_on_open"
         private const val CONNECT_ON_BOOT = "connect_on_boot"
@@ -196,21 +230,21 @@ class Prefs(context: Context) {
         private const val DISCONNECT_ON_MOBILE = "disconnect_on_mobile"
         private const val SUB_AUTO = "sub_auto_update"
         private const val SUB_HOURS = "sub_update_hours"
-        private const val FREE_FETCH = "last_free_fetch"
-        private const val FREE_WARN = "free_warning_dismissed"
-        private const val FREE_UNLOCKED = "free_configs_unlocked"
-        private const val FREE_CHANNEL_PREFIX = "free_channel_checkpoint_"
         private const val THEME_MODE = "theme_mode"
         private const val DYNAMIC_COLOR = "dynamic_color"
         private const val CF_SCAN = "cloudflare_scan"
         private const val KILL_SWITCH = "kill_switch"
         private const val DNS_PROTECT = "dns_protect"
-        private const val BLOCK_IPV6 = "block_ipv6"
         private const val IPV6_MODE = "ipv6_mode"
         private const val REMOTE_DNS = "remote_dns"
         private const val DNS_BOOTSTRAP = "dns_bootstrap"
         private const val MTU = "tunnel_mtu"
         private const val ALLOW_LAN = "allow_lan"
+        private const val FRAGMENT_MODE = "fragment_mode"
+        private const val TLS_FINGERPRINT = "tls_fingerprint"
+        private const val MUX_ENABLED = "mux_enabled"
+        private const val IRAN_DIRECT = "iran_direct"
+        private const val BLOCK_QUIC = "block_quic"
         private const val AUTO_FAILOVER = "auto_failover"
         private const val FAILOVER_RETRIES = "failover_retries"
         private const val NOTIFY_SERVER = "notify_server"
@@ -220,5 +254,7 @@ class Prefs(context: Context) {
         private const val PER_APP_ENABLED = "per_app_enabled"
         private const val PER_APP_BYPASS = "per_app_bypass"
         private const val PER_APP_SET = "per_app_set"
+
+        private val OBSOLETE_KEYS = setOf("last_free_fetch", "block_ipv6")
     }
 }

@@ -24,8 +24,8 @@ data class ServerConfig(
     val address: String,
     val port: Int,
     val uuid: String = "",           // id / user id
-    val alterId: Int = 0,             // legacy VMess alterId
-    val encryption: String = "",     // VMess security / VLESS encryption
+    val alterId: Int = 0,            // legacy VMess alterId
+    val encryption: String = "",     // VMess security / VLESS encryption (incl. post-quantum)
     val password: String = "",       // trojan/ss password
     val method: String = "",         // ss cipher
     val network: String = "tcp",     // tcp/ws/grpc/h2/httpupgrade/xhttp/quic...
@@ -37,14 +37,16 @@ data class ServerConfig(
     val mode: String = "",           // gRPC multi mode / xhttp mode (auto/packet-up/stream-up)
     val flow: String = "",
     val alpn: String = "",
-    val fingerprint: String = "",
-    val publicKey: String = "",
-    val shortId: String = "",
+    val fingerprint: String = "",    // uTLS fingerprint (chrome/firefox/...)
+    val publicKey: String = "",      // REALITY public key (pbk)
+    val shortId: String = "",        // REALITY short id (sid)
+    val spiderX: String = "",        // REALITY spiderX (spx)
+    val mldsa65Verify: String = "",  // REALITY post-quantum verify key (pqv), Xray 25.10+
+    val extra: String = "",          // XHTTP "extra" JSON blob
     val group: String = "",          // subscription / manual group
     val favorite: Boolean = false,
     val pingMs: Int? = null,         // last measured delay, null = untested/unreachable
     val latencyTested: Boolean = false, // distinguishes an actual failed probe from never tested
-    val noPingSinceMs: Long = 0L,    // epoch millis since it first had no ping (free configs); 0 = ok
     val rawUri: String = "",
 ) {
     /** Stable protocol identity used when a subscription is refreshed. */
@@ -52,20 +54,24 @@ data class ServerConfig(
         protocol.name, address.trim().lowercase(), port.toString(), uuid, password,
         method.lowercase(), network.lowercase(), security.lowercase(), sni.lowercase(),
         host.lowercase(), path, serviceName, flow, publicKey, shortId,
-    ).joinToString("\u001f")
+    ).joinToString(separator = "|")
+
     private val country: Country get() = Countries.detect(name)
     val flagEmoji: String get() = country.flag
     val displayCountry: String get() = country.faName
     val isoCode: String get() = country.iso
 
-    /** Anonymized label for free configs: country flag + a stable 6-digit code (no real name). */
-    val freeAlias: String get() {
-        val n = (kotlin.math.abs(id.hashCode()) % 900_000) + 100_000
-        return "$flagEmoji  $n"
+    /** Name shown to the user everywhere. */
+    val displayLabel: String get() = name.ifBlank { "$address:$port" }
+
+    /** Short technical summary used in list rows and on the connection card. */
+    val transportLabel: String get() = buildString {
+        append(protocol.label)
+        val net = network.lowercase().ifBlank { "tcp" }
+        if (net != "tcp") append(" - ").append(net.uppercase())
+        when (security.lowercase()) {
+            "tls" -> append(" - TLS")
+            "reality" -> append(" - REALITY")
+        }
     }
-
-    val isFree: Boolean get() = group == "رایگان"
-
-    /** Name to show the user everywhere — anonymized for free configs. */
-    val displayLabel: String get() = if (isFree) freeAlias else name
 }

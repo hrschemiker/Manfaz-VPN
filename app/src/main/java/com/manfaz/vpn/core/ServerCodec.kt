@@ -16,10 +16,11 @@ object ServerCodec {
         put("path", s.path); put("serviceName", s.serviceName); put("mode", s.mode)
         put("flow", s.flow); put("alpn", s.alpn)
         put("fingerprint", s.fingerprint); put("publicKey", s.publicKey)
-        put("shortId", s.shortId); put("group", s.group)
+        put("shortId", s.shortId); put("spiderX", s.spiderX)
+        put("mldsa65Verify", s.mldsa65Verify); put("extra", s.extra)
+        put("group", s.group)
         put("favorite", s.favorite); put("pingMs", s.pingMs ?: JSONObject.NULL)
-        put("latencyTested", s.latencyTested)
-        put("noPingSinceMs", s.noPingSinceMs); put("rawUri", s.rawUri)
+        put("latencyTested", s.latencyTested); put("rawUri", s.rawUri)
     }.toString()
 
     fun fromJson(json: String): ServerConfig {
@@ -47,11 +48,13 @@ object ServerCodec {
             fingerprint = o.optString("fingerprint"),
             publicKey = o.optString("publicKey"),
             shortId = o.optString("shortId"),
+            spiderX = o.optString("spiderX"),
+            mldsa65Verify = o.optString("mldsa65Verify"),
+            extra = o.optString("extra"),
             group = o.optString("group"),
             favorite = o.optBoolean("favorite"),
             pingMs = if (o.isNull("pingMs")) null else o.optInt("pingMs"),
             latencyTested = o.optBoolean("latencyTested", !o.isNull("pingMs")),
-            noPingSinceMs = o.optLong("noPingSinceMs"),
             rawUri = o.optString("rawUri"),
         )
     }

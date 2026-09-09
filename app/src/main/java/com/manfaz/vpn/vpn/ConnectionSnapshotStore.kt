@@ -21,11 +21,13 @@ object ConnectionSnapshotStore {
 
     data class Snapshot(
         val connected: Boolean,
+        val blocked: Boolean,
         val server: ServerConfig?,
         val ip: String,
         val ping: Int,
         val connectedSince: Long,
         val updatedAt: Long,
+        val reason: String = "",
     ) {
         val isFresh: Boolean
             get() = updatedAt > 0L &&
@@ -40,6 +42,7 @@ object ConnectionSnapshotStore {
         connectedSince: Long,
     ) = write(context, JSONObject().apply {
         put("connected", true)
+        put("blocked", false)
         put("server", ServerCodec.toJson(server))
         put("ip", ip)
         put("ping", ping)
@@ -47,8 +50,19 @@ object ConnectionSnapshotStore {
         put("updated", SystemClock.elapsedRealtime())
     })
 
+    /** Kill switch engaged: the tunnel is up but traffic is intentionally going nowhere. */
+    fun writeBlocked(context: Context, server: ServerConfig?, reason: String) =
+        write(context, JSONObject().apply {
+            put("connected", false)
+            put("blocked", true)
+            server?.let { put("server", ServerCodec.toJson(it)) }
+            put("reason", reason)
+            put("updated", SystemClock.elapsedRealtime())
+        })
+
     fun writeStopped(context: Context) = write(context, JSONObject().apply {
         put("connected", false)
+        put("blocked", false)
         put("updated", SystemClock.elapsedRealtime())
     })
 
@@ -57,12 +71,14 @@ object ConnectionSnapshotStore {
         val json = JSONObject(bytes.toString(Charsets.UTF_8))
         Snapshot(
             connected = json.optBoolean("connected", false),
+            blocked = json.optBoolean("blocked", false),
             server = json.optString("server").takeIf { it.isNotBlank() }
                 ?.let { ServerCodec.fromJson(it) },
             ip = json.optString("ip", "متصل"),
             ping = json.optInt("ping", 0),
             connectedSince = json.optLong("since", 0L),
             updatedAt = json.optLong("updated", 0L),
+            reason = json.optString("reason"),
         )
     }.getOrNull()
 

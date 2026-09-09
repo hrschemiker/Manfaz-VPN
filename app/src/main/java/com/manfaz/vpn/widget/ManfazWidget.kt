@@ -24,7 +24,8 @@ class ManfazWidget : AppWidgetProvider() {
         val server = lastServer(context)
         val snapshot = ConnectionSnapshotStore.read(context)
         val connected = snapshot?.connected == true
-        ids.forEach { manager.updateAppWidget(it, views(context, connected, server)) }
+        val blocked = snapshot?.blocked == true
+        ids.forEach { manager.updateAppWidget(it, views(context, connected, server, blocked = blocked)) }
     }
 
     override fun onReceive(context: Context, intent: Intent) {
@@ -34,10 +35,13 @@ class ManfazWidget : AppWidgetProvider() {
         val snapshot = ConnectionSnapshotStore.read(context)
         if (snapshot?.connected == true) {
             // Deliver the explicit stop command to the already-running foreground service.
-            context.startService(
-                Intent(context, com.manfaz.vpn.vpn.ManfazVpnService::class.java)
-                    .setAction(com.manfaz.vpn.vpn.ManfazVpnService.ACTION_STOP),
-            )
+            sendServiceAction(context, com.manfaz.vpn.vpn.ManfazVpnService.ACTION_STOP)
+            updateAll(context, false, snapshot.server ?: lastServer(context))
+            return
+        }
+        if (snapshot?.blocked == true) {
+            // While the kill switch holds traffic, the only useful widget action is releasing it.
+            sendServiceAction(context, com.manfaz.vpn.vpn.ManfazVpnService.ACTION_RELEASE)
             updateAll(context, false, snapshot.server ?: lastServer(context))
             return
         }
@@ -57,6 +61,19 @@ class ManfazWidget : AppWidgetProvider() {
         VpnController.connect(context, target)
     }
 
+    private fun sendServiceAction(context: Context, action: String) {
+        runCatching {
+            context.startService(
+                Intent(context, com.manfaz.vpn.vpn.ManfazVpnService::class.java)
+                    .setAction(action)
+                    .putExtra(
+                        com.manfaz.vpn.vpn.ManfazVpnService.EXTRA_EPOCH,
+                        android.os.SystemClock.elapsedRealtimeNanos(),
+                    ),
+            )
+        }
+    }
+
     private fun openForConsent(context: Context) {
         context.startActivity(
             Intent(context, MainActivity::class.java)
@@ -73,11 +90,15 @@ class ManfazWidget : AppWidgetProvider() {
             connected: Boolean,
             server: ServerConfig?,
             connecting: Boolean = false,
+            blocked: Boolean = false,
         ) {
             val effectiveServer = server ?: lastServer(context)
             val manager = AppWidgetManager.getInstance(context)
             val component = ComponentName(context, ManfazWidget::class.java)
-            manager.updateAppWidget(component, views(context, connected, effectiveServer, connecting))
+            manager.updateAppWidget(
+                component,
+                views(context, connected, effectiveServer, connecting, blocked),
+            )
         }
 
         private fun views(
@@ -85,12 +106,14 @@ class ManfazWidget : AppWidgetProvider() {
             connected: Boolean,
             server: ServerConfig?,
             connecting: Boolean = false,
+            blocked: Boolean = false,
         ): RemoteViews {
             val remote = RemoteViews(context.packageName, R.layout.widget_manfaz)
             remote.setImageViewResource(R.id.widget_country_art, countryArt(server))
             remote.setTextViewText(
                 R.id.widget_status,
                 when {
+                    blocked -> "اینترنت مسدود است"
                     connecting -> "در حال اتصال…"
                     connected && server != null -> "متصل به ${server.displayLabel}"
                     server != null -> server.displayLabel
@@ -100,12 +123,20 @@ class ManfazWidget : AppWidgetProvider() {
             remote.setTextViewText(
                 R.id.widget_subtitle,
                 when {
+                    blocked -> "برای آزادکردن اینترنت لمس کنید"
                     connecting -> "لطفاً چند لحظه صبر کنید"
                     connected -> "اتصال فعال است"
                     else -> "برای اتصال کلید را لمس کنید"
                 },
             )
-            remote.setTextViewText(R.id.widget_action, if (connected) "ON" else "OFF")
+            remote.setTextViewText(
+                R.id.widget_action,
+                when {
+                    blocked -> "آزاد"
+                    connected -> "ON"
+                    else -> "OFF"
+                },
+            )
             remote.setTextColor(
                 R.id.widget_action,
                 context.getColor(if (connected) R.color.widget_switch_on_text else R.color.widget_switch_off_text),

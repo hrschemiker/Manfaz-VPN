@@ -31,13 +31,15 @@ class ManfazApp : Application() {
         if (isMainProcess()) {
             ServerRepository.init(this)
             SubscriptionRepository.init(this)
-            com.manfaz.vpn.data.FreeConfigRepository.init(this)
+            // Clean up state left behind by features that no longer ship.
+            com.manfaz.vpn.data.store.Persistence(this).deleteObsoleteFiles()
             ContextCompat.registerReceiver(
                 this, stateReceiver, IntentFilter(StateBridge.ACTION),
                 ContextCompat.RECEIVER_NOT_EXPORTED,
             )
-            // C#14: refresh subscriptions on startup if auto-update is on and they're due
+            // Refresh subscriptions on startup if auto-update is on and they are due.
             val prefs = com.manfaz.vpn.data.Prefs(this)
+            prefs.pruneObsoleteKeys()
             com.manfaz.vpn.work.SubscriptionWorkScheduler.sync(this)
             if (prefs.subAutoUpdate) {
                 kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {

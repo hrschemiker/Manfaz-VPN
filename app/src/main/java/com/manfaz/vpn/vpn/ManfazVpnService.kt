@@ -21,17 +21,18 @@ import androidx.core.content.ContextCompat
 import com.manfaz.vpn.R
 import com.manfaz.vpn.core.HevTunnel
 import com.manfaz.vpn.core.ServerCodec
+import com.manfaz.vpn.core.TunnelOptions
 import com.manfaz.vpn.core.XrayConfig
 import com.manfaz.vpn.data.Ipv6Mode
 import com.manfaz.vpn.core.XrayCore
 import com.manfaz.vpn.net.ProxyHealthProbe
 import com.manfaz.vpn.ui.MainActivity
+import com.manfaz.vpn.util.LogBuffer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -46,21 +47,22 @@ class ManfazVpnService : VpnService() {
     companion object {
         const val ACTION_START = "com.manfaz.vpn.START"
         const val ACTION_STOP = "com.manfaz.vpn.STOP"
+
+        /**
+         * Kill-switch escape hatch. Tears the blocking tunnel down so the device is online
+         * again; surfaced both in the ongoing notification and on the home screen.
+         */
+        const val ACTION_RELEASE = "com.manfaz.vpn.RELEASE_KILL_SWITCH"
+
+        /** Retry the last connection attempt without leaving the kill-switch hold. */
+        const val ACTION_RETRY = "com.manfaz.vpn.RETRY"
+
         const val EXTRA_EPOCH = "connect_epoch"
         const val EXTRA_SERVER = "server_json"
-        const val EXTRA_KILL_SWITCH = "kill_switch"
-        const val EXTRA_DNS_PROTECT = "dns_protect"
-        const val EXTRA_IPV6_MODE = "ipv6_mode"
-        const val EXTRA_REMOTE_DNS = "remote_dns"
-        const val EXTRA_DNS_BOOTSTRAP = "dns_bootstrap"
-        const val EXTRA_MTU = "mtu"
-        const val EXTRA_ALLOW_LAN = "allow_lan"
-        const val EXTRA_NOTIFY_SERVER = "notify_server"
-        const val EXTRA_NOTIFY_SPEED = "notify_speed"
-        const val EXTRA_PERAPP_ENABLED = "perapp_enabled"
-        const val EXTRA_PERAPP_BYPASS = "perapp_bypass"
-        const val EXTRA_PERAPP_LIST = "perapp_list"
+        const val EXTRA_OPTIONS = "tunnel_options"
+
         private const val CHANNEL_ID = "manfaz_vpn_status"
+        private const val CHANNEL_ID_ALERT = "manfaz_vpn_alerts"
         private const val NOTIF_ID = 1001
         private const val TAG = "ManfazVpnService"
         private const val NOTIF_CONNECTING = "connecting"
@@ -82,14 +84,13 @@ class ManfazVpnService : VpnService() {
     private var lastStartIntent: Intent? = null
     @Volatile private var reloadingUpstream = false
     @Volatile private var serverName: String = "Manfaz VPN"
-    @Volatile private var killSwitch: Boolean = false
-    @Volatile private var showServerInNotification = true
-    @Volatile private var showSpeedInNotification = true
+    @Volatile private var options: TunnelOptions = TunnelOptions()
     @Volatile private var activeServer: com.manfaz.vpn.data.model.ServerConfig? = null
     @Volatile private var connectedSince: Long = 0L
     @Volatile private var lastExitIp: String = "متصل"
     @Volatile private var lastHeartbeatAt: Long = 0L
     @Volatile private var notifState = NOTIF_CONNECTING
+    @Volatile private var holdReason: String = ""
     @Volatile private var lastEpoch = 0L
     @Volatile private var activeMtu = HevTunnel.DEFAULT_MTU
     @Volatile private var consecutiveHealthFailures = 0
@@ -128,19 +129,35 @@ class ManfazVpnService : VpnService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_STOP -> {
+        val action = intent?.action
+        when (action) {
+            ACTION_STOP, ACTION_RELEASE -> {
                 // Record the disconnect marker so any stale START (e.g. a scan that finished
                 // after the user hit disconnect) arriving later is dropped, never resurrecting
                 // the VPN behind the user's back.
-                lastEpoch = maxOf(lastEpoch + 1L, intent.getLongExtra(EXTRA_EPOCH, 0L))
+                lastEpoch = maxOf(lastEpoch + 1L, intent?.getLongExtra(EXTRA_EPOCH, 0L) ?: 0L)
+                if (action == ACTION_RELEASE) {
+                    LogBuffer.log(this, "kill-switch", "user released the traffic block")
+                }
                 connectJob?.cancel(); connectJob = null
                 teardown(); stopSelf(startId)
             }
+            ACTION_RETRY -> retryLastConnection()
             else -> startTunnel(intent)
         }
         // If Android reclaims this foreground process, redeliver the last connection intent.
-        return if (intent?.action == ACTION_STOP) START_NOT_STICKY else START_REDELIVER_INTENT
+        return if (action == ACTION_STOP || action == ACTION_RELEASE) {
+            START_NOT_STICKY
+        } else {
+            START_REDELIVER_INTENT
+        }
+    }
+
+    /** Re-runs the last START intent, used by the "try again" notification action. */
+    private fun retryLastConnection() {
+        val previous = lastStartIntent ?: return
+        val retry = Intent(previous).putExtra(EXTRA_EPOCH, SystemClock.elapsedRealtimeNanos())
+        startTunnel(retry)
     }
 
     private fun startTunnel(intent: Intent?) {
@@ -154,92 +171,60 @@ class ManfazVpnService : VpnService() {
         lastStartIntent = intent?.let(::Intent)
 
         connectJob?.cancel()
-        createChannel()
+        createChannels()
         notifState = NOTIF_CONNECTING
         startForeground(NOTIF_ID, buildNotification())
         // Clean restart if a previous tunnel is still up (switching servers).
         if (tun != null) {
             statsJob?.cancel(); statsJob = null
+            healthJob?.cancel(); healthJob = null
             HevTunnel.stop(); XrayCore.stop()
             runCatching { tun?.close() }; tun = null
         }
 
         val server = intent?.getStringExtra(EXTRA_SERVER)
             ?.let { runCatching { ServerCodec.fromJson(it) }.getOrNull() }
+        options = TunnelOptions.fromJson(intent?.getStringExtra(EXTRA_OPTIONS))
         if (server == null) {
             StateBridge.sendFailed(this, "سروری انتخاب نشده است."); teardown(); stopSelf(); return
         }
         serverName = server.displayLabel
         activeServer = server
-        killSwitch = intent.getBooleanExtra(EXTRA_KILL_SWITCH, false)
-        val dnsProtect = intent.getBooleanExtra(EXTRA_DNS_PROTECT, false)
-        val ipv6Mode = runCatching {
-            Ipv6Mode.valueOf(intent.getStringExtra(EXTRA_IPV6_MODE) ?: Ipv6Mode.DIRECT.name)
-        }.getOrDefault(Ipv6Mode.DIRECT)
-        val remoteDns = intent.getStringExtra(EXTRA_REMOTE_DNS) ?: "1.1.1.1"
-        val dnsBootstrap = intent.getStringExtra(EXTRA_DNS_BOOTSTRAP) ?: "1.1.1.1"
-        val requestedMtu = intent.getIntExtra(EXTRA_MTU, 0)
-        val mtu = if (requestedMtu == 0) autoMtu() else requestedMtu.coerceIn(1280, 1500)
-        val allowLan = intent.getBooleanExtra(EXTRA_ALLOW_LAN, true)
-        showServerInNotification = intent.getBooleanExtra(EXTRA_NOTIFY_SERVER, true)
-        showSpeedInNotification = intent.getBooleanExtra(EXTRA_NOTIFY_SPEED, true)
-        getSystemService(NotificationManager::class.java).notify(NOTIF_ID, buildNotification())
-        val perAppEnabled = intent.getBooleanExtra(EXTRA_PERAPP_ENABLED, false)
-        val perAppBypass = intent.getBooleanExtra(EXTRA_PERAPP_BYPASS, true)
-        val perAppList = intent.getStringArrayExtra(EXTRA_PERAPP_LIST)?.toList() ?: emptyList()
+        val mtu = if (options.mtu == 0) autoMtu() else options.mtu.coerceIn(1280, 1500)
+        notifyStatus()
 
         connectJob = scope.launch {
             try {
                 XrayCore.initEnv(this@ManfazVpnService)
-                validateDns(remoteDns, dnsBootstrap)
-                val config = XrayConfig.build(
-                    server, remoteDns = remoteDns,
-                    dnsBootstrap = dnsBootstrap,
-                    dnsLeakProtection = dnsProtect, allowLan = allowLan, ipv6Mode = ipv6Mode,
-                )
+                validateDns(options.remoteDns, options.dnsBootstrap)
+                val config = XrayConfig.build(server, options)
 
-                val builder = Builder()
-                    .setSession("Manfaz VPN")
-                    .setMtu(mtu)
-                    .addAddress(HevTunnel.TUN_IPV4, 30)
-                    .addRoute("0.0.0.0", 0)
-                // A custom resolver is opt-in. Without it Android inherits the physical
-                // network's DNS instead of silently forcing 1.1.1.1.
-                if (dnsProtect) builder.addDnsServer(dnsBootstrap)
-                when (ipv6Mode) {
-                    Ipv6Mode.BLOCK -> Unit // No IPv6 family configured: Android blocks it cleanly.
-                    Ipv6Mode.TUNNEL -> {
-                        builder.addAddress("fd00:1:2:3::1", 64)
-                        builder.addRoute("::", 0)
-                    }
-                    Ipv6Mode.DIRECT -> builder.allowFamily(OsConstants.AF_INET6)
-                }
-                // A5: per-app split tunnel (or just exclude ourselves to avoid a loop)
-                configurePerApp(builder, perAppEnabled, perAppBypass, perAppList)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) builder.setMetered(false)
-
-                val pfd = builder.establish()
-                    ?: throw IllegalStateException("VPN permission is required.")
+                val pfd = establishTun(mtu)
                 tun = pfd
                 activeMtu = mtu
 
-                com.manfaz.vpn.util.LogBuffer.log(this@ManfazVpnService, "connect", "starting ${server.displayLabel} (${server.protocol.label})")
+                LogBuffer.log(
+                    this@ManfazVpnService,
+                    "connect",
+                    "starting ${server.displayLabel} (${server.transportLabel})",
+                )
                 // 1) Start Xray core with the SOCKS inbound (tunFd=0 — hev drives the TUN)
                 XrayCore.start(config, 0) { code, msg ->
                     Log.i(TAG, "core status $code: $msg")
-                    if (msg.isNotBlank()) com.manfaz.vpn.util.LogBuffer.log(this@ManfazVpnService, "core", msg)
+                    if (msg.isNotBlank()) LogBuffer.log(this@ManfazVpnService, "core", msg)
                 }
                 // 2) Start tun2socks: pump the TUN into Xray's SOCKS inbound
                 HevTunnel.start(
                     this@ManfazVpnService, pfd.fd, XrayConfig.SOCKS_PORT, mtu,
-                    tunnelIpv6 = ipv6Mode == Ipv6Mode.TUNNEL,
+                    tunnelIpv6 = options.ipv6Mode == Ipv6Mode.TUNNEL,
                 )
 
                 connectedSince = SystemClock.elapsedRealtime()
                 lastHeartbeatAt = connectedSince
                 lastExitIp = "متصل"
+                holdReason = ""
                 notifState = NOTIF_CONNECTED
-                getSystemService(NotificationManager::class.java).notify(NOTIF_ID, buildNotification())
+                notifyStatus()
                 StateBridge.sendConnected(
                     this@ManfazVpnService, server, lastExitIp, server.pingMs ?: 0, connectedSince,
                 )
@@ -249,7 +234,7 @@ class ManfazVpnService : VpnService() {
                 com.manfaz.vpn.widget.ManfazWidget.updateAll(this@ManfazVpnService, true, server)
                 startStatsPolling()
                 startHealthMonitoring()
-                // C#9: fetch the real exit IP + country through the proxy
+                // Resolve the real exit IP + country through the proxy.
                 launch {
                     com.manfaz.vpn.net.ExitIp.fetch(XrayConfig.SOCKS_PORT)?.let {
                         lastExitIp = it.ip
@@ -263,19 +248,78 @@ class ManfazVpnService : VpnService() {
                 throw e
             } catch (e: Throwable) {
                 Log.e(TAG, "startTunnel failed", e)
-                com.manfaz.vpn.util.LogBuffer.log(this@ManfazVpnService, "error", e.message ?: e.toString())
-                StateBridge.sendFailed(this@ManfazVpnService, friendlyError(e))
-                if (killSwitch && tun != null) {
-                    // A2 kill switch: keep the TUN up so traffic is blocked, not leaked.
-                    HevTunnel.stop(); XrayCore.stop()
-                    Log.w(TAG, "kill switch active — holding TUN to block traffic")
-                    notifState = NOTIF_HOLDING
-                    getSystemService(NotificationManager::class.java).notify(NOTIF_ID, buildNotification())
+                LogBuffer.log(this@ManfazVpnService, "error", e.message ?: e.toString())
+                val message = friendlyError(e)
+                if (options.killSwitch) {
+                    engageKillSwitch(message, mtu)
                 } else {
+                    StateBridge.sendFailed(this@ManfazVpnService, message)
                     teardown(); stopSelf()
                 }
             }
         }
+    }
+
+    /**
+     * Builds the TUN interface. Everything the tunnel needs to be leak-free lives here, so a
+     * kill-switch hold can reuse exactly the same routing without a working proxy behind it.
+     */
+    private fun establishTun(mtu: Int): ParcelFileDescriptor {
+        val builder = Builder()
+            .setSession("Manfaz VPN")
+            .setMtu(mtu)
+            .addAddress(HevTunnel.TUN_IPV4, 30)
+            .addRoute("0.0.0.0", 0)
+        // A custom resolver is opt-in. Without it Android inherits the physical network's DNS
+        // instead of silently forcing one.
+        if (options.dnsLeakProtection) builder.addDnsServer(options.dnsBootstrap)
+        when (options.ipv6Mode) {
+            Ipv6Mode.BLOCK -> Unit // No IPv6 family configured: Android blocks it cleanly.
+            Ipv6Mode.TUNNEL -> {
+                builder.addAddress(HevTunnel.TUN_IPV6, 64)
+                builder.addRoute("::", 0)
+            }
+            Ipv6Mode.DIRECT -> builder.allowFamily(OsConstants.AF_INET6)
+        }
+        configurePerApp(builder)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) builder.setMetered(false)
+        return builder.establish()
+            ?: throw IllegalStateException("VPN permission is required.")
+    }
+
+    /**
+     * Kill switch: keep (or install) a tunnel that swallows every packet, so a failed or
+     * dropped proxy can never fall back to the unprotected network. The ongoing notification
+     * then carries an explicit "release the internet" action, because a phone that is
+     * silently offline with no way back is worse than a leak the user chose to accept.
+     */
+    private fun engageKillSwitch(reason: String, mtu: Int) {
+        HevTunnel.stop()
+        XrayCore.stop()
+        statsJob?.cancel(); statsJob = null
+        healthJob?.cancel(); healthJob = null
+        if (tun == null) {
+            // The failure happened before the interface existed (bad config, DNS, consent).
+            // Install the blocking interface now so the switch means what it promises.
+            tun = runCatching { establishTun(if (mtu in 1280..1500) mtu else HevTunnel.DEFAULT_MTU) }
+                .onFailure { Log.w(TAG, "kill switch could not install a blocking tunnel", it) }
+                .getOrNull()
+        }
+        if (tun == null) {
+            // Nothing can be blocked without an interface; fail honestly instead of pretending.
+            StateBridge.sendFailed(this, reason)
+            teardown(); stopSelf()
+            return
+        }
+        connectedSince = 0L
+        holdReason = reason
+        notifState = NOTIF_HOLDING
+        Log.w(TAG, "kill switch active — holding TUN to block traffic")
+        LogBuffer.log(this, "kill-switch", "traffic blocked: $reason")
+        notifyStatus()
+        ConnectionSnapshotStore.writeBlocked(this, activeServer, reason)
+        StateBridge.sendBlocked(this, reason, activeServer)
+        com.manfaz.vpn.widget.ManfazWidget.updateAll(this, false, activeServer)
     }
 
     /**
@@ -285,27 +329,12 @@ class ManfazVpnService : VpnService() {
      */
     private fun reloadForUpstreamHandover() {
         val pfd = tun ?: return
-        val intent = lastStartIntent ?: return
         val server = activeServer ?: return
         if (!XrayCore.isRunning || reloadingUpstream) return
         reloadingUpstream = true
         scope.launch {
             runCatching {
-                val dnsProtect = intent.getBooleanExtra(EXTRA_DNS_PROTECT, false)
-                val ipv6Mode = runCatching {
-                    Ipv6Mode.valueOf(intent.getStringExtra(EXTRA_IPV6_MODE) ?: Ipv6Mode.DIRECT.name)
-                }.getOrDefault(Ipv6Mode.DIRECT)
-                val remoteDns = intent.getStringExtra(EXTRA_REMOTE_DNS) ?: "1.1.1.1"
-                val dnsBootstrap = intent.getStringExtra(EXTRA_DNS_BOOTSTRAP) ?: "1.1.1.1"
-                val allowLan = intent.getBooleanExtra(EXTRA_ALLOW_LAN, true)
-                val config = XrayConfig.build(
-                    server,
-                    remoteDns = remoteDns,
-                    dnsBootstrap = dnsBootstrap,
-                    dnsLeakProtection = dnsProtect,
-                    allowLan = allowLan,
-                    ipv6Mode = ipv6Mode,
-                )
+                val config = XrayConfig.build(server, options)
 
                 statsJob?.cancel(); statsJob = null
                 HevTunnel.stop()
@@ -315,43 +344,42 @@ class ManfazVpnService : VpnService() {
                 }
                 HevTunnel.start(
                     this@ManfazVpnService, pfd.fd, XrayConfig.SOCKS_PORT, activeMtu,
-                    tunnelIpv6 = ipv6Mode == Ipv6Mode.TUNNEL,
+                    tunnelIpv6 = options.ipv6Mode == Ipv6Mode.TUNNEL,
                 )
                 startStatsPolling()
                 sendAuthoritativeState()
-                com.manfaz.vpn.util.LogBuffer.log(
+                LogBuffer.log(
                     this@ManfazVpnService, "network", "proxy reloaded after upstream handover",
                 )
             }.onFailure {
                 Log.e(TAG, "upstream handover reload failed", it)
-                // The TUN is intentionally kept alive during reload. If recovery fails, tear it
-                // down explicitly so UI, notification and Android's VPN icon never disagree.
-                teardown(notifyStopped = false)
-                StateBridge.sendFailed(
-                    this@ManfazVpnService,
-                    "بازیابی اتصال ناموفق بود؛ سرور جایگزین بررسی می‌شود.",
-                )
-                stopSelf()
+                val message = "بازیابی اتصال ناموفق بود."
+                if (options.killSwitch) {
+                    // Never drop back to the raw network behind the user's back.
+                    engageKillSwitch(message, activeMtu)
+                } else {
+                    // The TUN is intentionally kept alive during reload. If recovery fails, tear
+                    // it down explicitly so UI, notification and Android's VPN icon agree.
+                    teardown(notifyStopped = false)
+                    StateBridge.sendFailed(
+                        this@ManfazVpnService,
+                        "$message سرور جایگزین بررسی می‌شود.",
+                    )
+                    stopSelf()
+                }
             }
             reloadingUpstream = false
         }
     }
 
-    /** A5: configure per-app split tunneling on the TUN builder. */
-    private fun configurePerApp(
-        builder: Builder, enabled: Boolean, bypassMode: Boolean, apps: List<String>,
-    ) {
-        if (!enabled) {
+    /** Per-app split tunneling. The app itself is always excluded to avoid a routing loop. */
+    private fun configurePerApp(builder: Builder) {
+        val apps = options.perAppList
+        if (!options.perAppEnabled || apps.isEmpty()) {
             runCatching { builder.addDisallowedApplication(packageName) }
             return
         }
-        require(bypassMode || apps.isNotEmpty()) {
-            "در حالت «فقط برنامه‌های انتخابی»، حداقل یک برنامه را انتخاب کنید."
-        }
-        if (apps.isEmpty()) {
-            runCatching { builder.addDisallowedApplication(packageName) }
-            return
-        }
+        val bypassMode = options.perAppBypass
         val set = apps.toMutableSet()
         if (bypassMode) set.add(packageName) else set.remove(packageName)
         set.forEach { pkg ->
@@ -404,7 +432,6 @@ class ManfazVpnService : VpnService() {
     private fun startStatsPolling() {
         statsJob?.cancel()
         statsJob = scope.launch {
-            val nm = getSystemService(NotificationManager::class.java)
             while (isActive) {
                 delay(1000)
                 val (up, down) = XrayCore.queryTraffic()
@@ -415,9 +442,9 @@ class ManfazVpnService : VpnService() {
                     lastHeartbeatAt = now
                     sendAuthoritativeState()
                 }
-                // C#10: live speed in the ongoing notification
-                if (showSpeedInNotification) runCatching {
-                    nm.notify(NOTIF_ID, buildNotification("↓ ${speed(down)}   ↑ ${speed(up)}"))
+                // Live speed in the ongoing notification.
+                if (options.showSpeedInNotification && notifState == NOTIF_CONNECTED) {
+                    notifyStatus("↓ ${speed(down)}   ↑ ${speed(up)}")
                 }
             }
         }
@@ -446,7 +473,7 @@ class ManfazVpnService : VpnService() {
                         ) {
                             consecutiveHealthFailures = 0
                             lastHealthRecoveryAt = now
-                            com.manfaz.vpn.util.LogBuffer.log(
+                            LogBuffer.log(
                                 this@ManfazVpnService,
                                 "health",
                                 "end-to-end probe failed repeatedly; recovering proxy",
@@ -462,12 +489,19 @@ class ManfazVpnService : VpnService() {
 
     private fun sendAuthoritativeState() {
         val server = activeServer
-        if (tun != null && XrayCore.isRunning && server != null && connectedSince > 0L) {
-            ConnectionSnapshotStore.writeConnected(this, server, lastExitIp, server.pingMs ?: 0, connectedSince)
-            StateBridge.sendConnected(this, server, lastExitIp, server.pingMs ?: 0, connectedSince)
-        } else {
-            ConnectionSnapshotStore.writeStopped(this)
-            StateBridge.sendStopped(this)
+        when {
+            tun != null && XrayCore.isRunning && server != null && connectedSince > 0L -> {
+                ConnectionSnapshotStore.writeConnected(this, server, lastExitIp, server.pingMs ?: 0, connectedSince)
+                StateBridge.sendConnected(this, server, lastExitIp, server.pingMs ?: 0, connectedSince)
+            }
+            notifState == NOTIF_HOLDING && tun != null -> {
+                ConnectionSnapshotStore.writeBlocked(this, server, holdReason)
+                StateBridge.sendBlocked(this, holdReason, server)
+            }
+            else -> {
+                ConnectionSnapshotStore.writeStopped(this)
+                StateBridge.sendStopped(this)
+            }
         }
     }
 
@@ -494,6 +528,7 @@ class ManfazVpnService : VpnService() {
         consecutiveHealthFailures = 0
         activeMtu = HevTunnel.DEFAULT_MTU
         notifState = NOTIF_CONNECTING
+        holdReason = ""
         stopForegroundCompat()
         runCatching { getSystemService(NotificationManager::class.java).cancel(NOTIF_ID) }
         com.manfaz.vpn.widget.ManfazWidget.updateAll(this, false, lastServer)
@@ -504,46 +539,86 @@ class ManfazVpnService : VpnService() {
     private fun friendlyError(e: Throwable): String {
         val m = e.message ?: ""
         return when {
-            m.contains("permission", true) -> "VPN permission is required."
-            m.contains("پشتیبانی") -> m
+            m.contains("permission", true) -> "اجازهٔ VPN لازم است."
+            m.contains("پشتیبانی") || m.contains("معتبر") -> m
             else -> "اتصال برقرار نشد: ${m.take(80)}"
         }
     }
 
+    private fun notifyStatus(speedLine: String? = null) {
+        runCatching {
+            getSystemService(NotificationManager::class.java)
+                .notify(NOTIF_ID, buildNotification(speedLine))
+        }
+    }
+
+    private fun servicePendingIntent(action: String, requestCode: Int): PendingIntent =
+        PendingIntent.getService(
+            this, requestCode,
+            Intent(this, ManfazVpnService::class.java).setAction(action),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+
     private fun buildNotification(speedLine: String? = null): Notification {
         val open = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        val stop = PendingIntent.getService(
-            this, 1, Intent(this, ManfazVpnService::class.java).setAction(ACTION_STOP),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
+        val holding = notifState == NOTIF_HOLDING
         // The notification must tell the truth about the tunnel state: it is posted before
         // the core connects, and during a kill-switch hold the tunnel is deliberately down.
         val (title, base) = when (notifState) {
-            NOTIF_HOLDING -> "اتصال قطع شد — محافظت فعال" to "برای جلوگیری از نشت، ترافیک مسدود است"
+            NOTIF_HOLDING -> "اینترنت مسدود شد — کلید قطع اضطراری" to
+                (holdReason.ifBlank { "برای جلوگیری از نشت، همهٔ ترافیک متوقف شده است" })
             NOTIF_CONNECTED -> "متصل به منفذ" to
-                (if (showServerInNotification) serverName else "اتصال محافظت‌شده")
+                (if (options.showServerInNotification) serverName else "اتصال محافظت‌شده")
             else -> "در حال اتصال به منفذ…" to "در حال برقراری اتصال امن…"
         }
         val text = if (speedLine != null) "$base\n$speedLine" else base
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+        val builder = NotificationCompat.Builder(
+            this,
+            if (holding) CHANNEL_ID_ALERT else CHANNEL_ID,
+        )
             .setContentTitle(title)
             .setContentText(if (speedLine != null) speedLine else base)
             .setStyle(NotificationCompat.BigTextStyle().bigText(text))
             .setSmallIcon(R.mipmap.ic_launcher)
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setContentIntent(open)
-            .addAction(0, "قطع اتصال", stop)
-            .build()
+
+        if (holding) {
+            // Order matters: the escape hatch is the first, most reachable action.
+            builder.setPriority(NotificationCompat.PRIORITY_HIGH)
+            builder.addAction(0, "آزاد کردن اینترنت", servicePendingIntent(ACTION_RELEASE, 2))
+            builder.addAction(0, "تلاش دوباره", servicePendingIntent(ACTION_RETRY, 3))
+        } else {
+            builder.addAction(0, "قطع اتصال", servicePendingIntent(ACTION_STOP, 1))
+        }
+        return builder.build()
     }
 
-    private fun createChannel() {
+    private fun createChannels() {
         val nm = getSystemService(NotificationManager::class.java)
-        val ch = NotificationChannel(CHANNEL_ID, "وضعیت اتصال", NotificationManager.IMPORTANCE_LOW)
-        ch.setShowBadge(false)
-        nm.createNotificationChannel(ch)
+        nm.createNotificationChannel(
+            NotificationChannel(CHANNEL_ID, "وضعیت اتصال", NotificationManager.IMPORTANCE_LOW)
+                .apply { setShowBadge(false) },
+        )
+        // A blocked device must be able to break through Do Not Disturb-style quieting;
+        // the user has no other way to learn why the internet stopped working.
+        nm.createNotificationChannel(
+            NotificationChannel(
+                CHANNEL_ID_ALERT,
+                "هشدار کلید قطع اضطراری",
+                NotificationManager.IMPORTANCE_HIGH,
+            ).apply {
+                setShowBadge(true)
+                enableVibration(true)
+                description = "زمانی که اینترنت برای جلوگیری از نشت مسدود می‌شود"
+            },
+        )
     }
 
     private fun stopForegroundCompat() {
@@ -561,5 +636,4 @@ class ManfazVpnService : VpnService() {
         serviceJob.cancel()
         super.onDestroy()
     }
-
 }

@@ -9,32 +9,11 @@ import org.json.JSONObject
 import java.io.File
 
 /** Minimal JSON-file persistence for servers and subscriptions (internal storage). */
-class Persistence(context: Context) {
+class Persistence(private val context: Context) {
 
     private val secureStore = SecureFileStore(context)
     private val serversFile = File(context.filesDir, "servers.json")
     private val subsFile = File(context.filesDir, "subscriptions.json")
-    private val freeFile = File(context.filesDir, "free_configs.json")
-    private val seenFreeFile = File(context.filesDir, "free_configs_seen.json")
-
-    fun loadFreeConfigs(): List<ServerConfig>? = read(freeFile)?.let { arr ->
-        (0 until arr.length()).map { serverFromJson(arr.getJSONObject(it)) }
-    }
-
-    fun saveFreeConfigs(list: List<ServerConfig>) {
-        val arr = JSONArray()
-        list.forEach { arr.put(serverToJson(it)) }
-        write(freeFile, arr)
-    }
-
-    fun loadSeenFreeKeys(): Set<String> = read(seenFreeFile)?.let { arr ->
-        (0 until arr.length()).map { arr.optString(it) }.filter { it.isNotBlank() }.toSet()
-    } ?: emptySet()
-
-    fun saveSeenFreeKeys(keys: Collection<String>) {
-        write(seenFreeFile, JSONArray().apply { keys.forEach(::put) })
-    }
-
     fun loadServers(): List<ServerConfig>? = read(serversFile)?.let { arr ->
         (0 until arr.length()).map { serverFromJson(arr.getJSONObject(it)) }
     }
@@ -43,6 +22,13 @@ class Persistence(context: Context) {
         val arr = JSONArray()
         list.forEach { arr.put(serverToJson(it)) }
         write(serversFile, arr)
+    }
+
+    /** Removes files left behind by features that no longer exist. */
+    fun deleteObsoleteFiles() {
+        listOf("free_configs.json", "free_configs_seen.json").forEach { name ->
+            runCatching { File(context.filesDir, name).delete() }
+        }
     }
 
     fun loadSubs(): List<Subscription>? = read(subsFile)?.let { arr ->
@@ -72,9 +58,10 @@ class Persistence(context: Context) {
         put("path", s.path); put("serviceName", s.serviceName); put("mode", s.mode)
         put("flow", s.flow); put("alpn", s.alpn)
         put("fingerprint", s.fingerprint); put("publicKey", s.publicKey)
-        put("shortId", s.shortId); put("group", s.group); put("favorite", s.favorite)
+        put("shortId", s.shortId); put("spiderX", s.spiderX)
+        put("mldsa65Verify", s.mldsa65Verify); put("extra", s.extra)
+        put("group", s.group); put("favorite", s.favorite)
         put("pingMs", s.pingMs ?: JSONObject.NULL); put("latencyTested", s.latencyTested)
-        put("noPingSinceMs", s.noPingSinceMs)
         put("rawUri", s.rawUri)
     }
 
@@ -101,11 +88,13 @@ class Persistence(context: Context) {
         fingerprint = o.optString("fingerprint"),
         publicKey = o.optString("publicKey"),
         shortId = o.optString("shortId"),
+        spiderX = o.optString("spiderX"),
+        mldsa65Verify = o.optString("mldsa65Verify"),
+        extra = o.optString("extra"),
         group = o.optString("group"),
         favorite = o.optBoolean("favorite"),
         pingMs = if (o.isNull("pingMs")) null else o.optInt("pingMs"),
         latencyTested = o.optBoolean("latencyTested", !o.isNull("pingMs")),
-        noPingSinceMs = o.optLong("noPingSinceMs"),
         rawUri = o.optString("rawUri"),
     )
 

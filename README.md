@@ -31,12 +31,29 @@ The application is designed for real mobile conditions: process recreation, back
 
 - VLESS, VMess, Trojan, Shadowsocks, SOCKS5, and HTTP through Xray
 - Native Android `VpnService` integration with an isolated core process
-- Queue-controlled HTTP-through-proxy latency checks with independent provider fallbacks—not synthetic numbers
+- Two-phase latency testing: a fast TCP-handshake sweep across every server, then a real
+  end-to-end probe through the fastest candidates—with live progress and a stop button
 - Automatic failover, fastest-server selection, and last-server reconnect
 - Connection state recovery after the UI process returns from the background
 - Validated Wi-Fi/mobile handover with in-place proxy-core recovery
 - Conservative end-to-end health monitoring with multi-failure recovery and reconnect-loop protection
 - Quick Settings tile, launcher shortcuts, persistent notification, and home-screen widget
+
+### Circumvention
+
+Defaults are tuned for the conditions Iranian networks actually present:
+
+- **TLS ClientHello fragmentation** through a dedicated `freedom` dialer, so SNI-based
+  inspection cannot reassemble the hostname. Four modes, from off to an aggressive profile
+  that adds padding noise for the hardest conditions.
+- **REALITY**, including post-quantum `mldsa65Verify` verification when a share link carries it
+- **Configurable uTLS fingerprint**, because a ClientHello that matches no real browser is
+  itself a signal
+- **Domestic split routing**: `.ir` and the major Iranian services stay off the tunnel, so
+  banking and shopping sites keep seeing a domestic address
+- **QUIC blocking**, which pushes browsers back to TCP+TLS that the tunnel carries reliably
+- **Mux.Cool with XUDP** for networks that throttle UDP or limit connection counts
+- **Encrypted DNS by default**, resolved inside the tunnel
 
 ### Import and subscriptions
 
@@ -48,16 +65,27 @@ The application is designed for real mobile conditions: process recreation, back
 ### Routing and privacy controls
 
 - Per-app split tunneling with bypass and allow-only modes
-- DNS leak protection with plain DNS and DoH configuration
+- DNS leak protection, on by default, with plain DNS and DoH configuration. The proxy
+  endpoint's own hostname and the DoH resolver are pinned to a numeric bootstrap resolver,
+  so resolution can never become circular or leak the destination
+- Routing uses explicit CIDR and domain matchers rather than `geoip:`/`geosite:` tags, which
+  would require geo databases the app does not ship
 - IPv4/IPv6 routing modes, LAN access control, and automatic or manual MTU
-- Optional kill switch and Android Always-on VPN compatibility
+- **Kill switch with an escape hatch**: when the tunnel fails, the interface is held open so
+  no traffic leaks, and a "release the internet" action appears immediately both on the home
+  screen and in the phone's notification—along with a retry action and a Quick Settings tile
+  that says what is happening
+- Android Always-on VPN compatibility
 - Optional Cloudflare clean-IP discovery for eligible CDN configurations
 
 ### Experience
 
 - Persian-first RTL interface
 - Light, Dark, and AMOLED themes
-- Search, sorting, favorites, connection diagnostics, and live traffic statistics
+- Consistent app bars, edge-to-edge insets, and 48dp touch targets throughout
+- Search across name, address, subscription and protocol; sorting, favorites, and
+  destructive actions behind a long-press menu with confirmation
+- Connection diagnostics with a monospaced, auto-scrolled log and one-tap sharing
 - Contextual explanations for technical settings
 - Password-encrypted backup and restore
 
@@ -108,6 +136,14 @@ manfaz.keyPassword=your-key-password
 ```
 
 With valid credentials, `assembleRelease` produces signed per-ABI APKs. Without them, Gradle can still produce debug and unsigned release artifacts.
+
+### Releases
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`, which builds the per-ABI APKs and
+attaches them, with SHA-256 checksums, to a GitHub Release. Set the `KEYSTORE_BASE64`,
+`KEYSTORE_PASSWORD`, `KEY_ALIAS` and `KEY_PASSWORD` repository secrets to have that build
+signed with the project key; without them the workflow publishes unsigned artifacts instead
+of failing.
 
 ## Security and privacy
 

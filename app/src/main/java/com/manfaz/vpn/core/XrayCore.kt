@@ -11,9 +11,9 @@ import java.io.File
 /**
  * Thin wrapper around AndroidLibXrayLite (Xray core).
  *
- * Lifecycle: [initEnv] once (copies geoip/geosite assets + sets XUDP key), then
- * [start] with a generated config and the VPN TUN file descriptor, [stop] to tear down.
- * Traffic counters come straight from the running core via [queryTraffic].
+ * Lifecycle: [initEnv] once (sets the XUDP key and the asset directory), then [start] with a
+ * generated config, [stop] to tear down. Traffic counters come straight from the running core
+ * via [queryTraffic].
  */
 object XrayCore {
 
@@ -25,21 +25,24 @@ object XrayCore {
 
     fun version(): String = try { Libv2ray.checkVersionX() } catch (e: Throwable) { "?" }
 
-    // Cloudflare's tiny 204 endpoint is globally reachable and avoids treating a server as
-    // dead merely because that provider blocks Google connectivity-check hosts.
+    /**
+     * Latency probe targets. Cloudflare's endpoint is first because it stays reachable from
+     * providers that block Google's connectivity-check hosts; the rest cover the cases where
+     * Cloudflare itself is the thing being filtered.
+     */
     val DELAY_TEST_URLS = listOf(
         "https://cp.cloudflare.com/generate_204",
         "https://www.gstatic.com/generate_204",
         "http://www.msftconnecttest.com/connecttest.txt",
     )
-    // Returns ~2 KB of real body → a success proves data actually downloads through the config.
+
+    /** Returns ~2 KB of real body, so a success proves data actually downloads through the config. */
     const val DOWNLOAD_TEST_URL = "https://speed.cloudflare.com/__down?bytes=2000"
 
     /**
      * Real HTTP-through-proxy latency for a single server's config, measured by spinning a
-     * temporary outbound in the core (does NOT require the VPN to be running). The core reads
-     * the full response body, so with [DOWNLOAD_TEST_URL] a success means real download works.
-     * Returns ms, or null on failure/timeout. Must run off the main thread.
+     * temporary outbound in the core (does NOT require the VPN to be running). Returns ms, or
+     * null on failure/timeout. Must run off the main thread.
      */
     fun measureDelay(
         context: Context,
@@ -49,8 +52,7 @@ object XrayCore {
         if (urls.isEmpty()) return null
         initEnv(context)
         for (url in urls.distinct()) {
-            val result = measureDelayOnce(configContent, url)
-            if (result != null) return result
+            measureDelayOnce(configContent, url)?.let { return it }
         }
         return null
     }
@@ -58,8 +60,8 @@ object XrayCore {
     /**
      * A conservative multi-pass probe for unreliable mobile networks. Every pass uses a
      * different connectivity provider, so a provider-specific block is not mistaken for a
-     * dead proxy. Keeping retries here also gives the native core a short recovery window
-     * after a previous temporary instance has shut down.
+     * dead proxy. The pause also gives the native core a short recovery window after a
+     * previous temporary instance has shut down.
      */
     fun measureDelayResilient(
         context: Context,
@@ -83,9 +85,8 @@ object XrayCore {
         return null
     }
 
-    fun measureDelay(context: Context, configContent: String, url: String): Int? {
-        return measureDelay(context, configContent, listOf(url))
-    }
+    fun measureDelay(context: Context, configContent: String, url: String): Int? =
+        measureDelay(context, configContent, listOf(url))
 
     private fun measureDelayOnce(configContent: String, url: String): Int? {
         return try {
@@ -97,18 +98,16 @@ object XrayCore {
         }
     }
 
-    /** Copy bundled geoip/geosite from assets to filesDir and initialize the core env. */
+    /** Initialize the core environment (asset dir + XUDP base key). */
     @Synchronized
     fun initEnv(context: Context) {
         if (initialized) return
         val dir = context.filesDir
-        copyAsset(context, "geoip.dat", File(dir, "geoip.dat"))
-        copyAsset(context, "geosite.dat", File(dir, "geosite.dat"))
         // XUDP base key: 32 bytes, URL-safe Base64, NO padding — the format the Go core
         // decodes with (RawURLEncoding). A padded/standard key panics the core (SIGABRT).
         val keyBytes = "android_id".toByteArray(Charsets.UTF_8).copyOf(32)
         val xudpKey = Base64.encodeToString(
-            keyBytes, Base64.NO_PADDING or Base64.URL_SAFE or Base64.NO_WRAP
+            keyBytes, Base64.NO_PADDING or Base64.URL_SAFE or Base64.NO_WRAP,
         )
         Libv2ray.initCoreEnv(dir.absolutePath, xudpKey)
         initialized = true
@@ -145,16 +144,5 @@ object XrayCore {
             val down = c.queryStats("proxy", "downlink")
             up to down
         } catch (e: Throwable) { 0L to 0L }
-    }
-
-    private fun copyAsset(context: Context, name: String, dest: File) {
-        if (dest.exists() && dest.length() > 0) return
-        try {
-            context.assets.open(name).use { input ->
-                dest.outputStream().use { output -> input.copyTo(output) }
-            }
-        } catch (e: Throwable) {
-            Log.w(TAG, "asset $name not found: ${e.message}")
-        }
     }
 }

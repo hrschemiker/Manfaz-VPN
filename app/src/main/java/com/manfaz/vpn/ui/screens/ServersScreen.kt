@@ -2,7 +2,6 @@ package com.manfaz.vpn.ui.screens
 
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -20,8 +19,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.QrCode2
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Sort
 import androidx.compose.material.icons.filled.Speed
@@ -29,9 +29,9 @@ import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.DataUsage
 import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -52,13 +52,16 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.manfaz.vpn.ui.MainViewModel
+import com.manfaz.vpn.ui.components.ManfazScreen
 import com.manfaz.vpn.ui.theme.BrandAmber
-import com.manfaz.vpn.ui.theme.BrandOrange
 import com.manfaz.vpn.ui.theme.ConnectedGreen
 import com.manfaz.vpn.ui.theme.FailedRed
 import com.manfaz.vpn.ui.theme.NeutralGray
@@ -70,143 +73,154 @@ import com.manfaz.vpn.data.model.Countries
 import com.manfaz.vpn.data.model.ServerConfig
 import com.manfaz.vpn.data.model.Subscription
 
-@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun ServersScreen(
     vm: MainViewModel,
     onConnect: () -> Unit,
-    onOpenFree: () -> Unit,
+    onAddServer: () -> Unit,
     onEditServer: (String) -> Unit,
 ) {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    var menuFor by remember { mutableStateOf<com.manfaz.vpn.data.model.ServerConfig?>(null) }
+    val context = LocalContext.current
+    var menuFor by remember { mutableStateOf<ServerConfig?>(null) }
     val servers by vm.servers.collectAsState()
     val subscriptions by vm.subscriptions.collectAsState()
-    val testing by vm.testing.collectAsState()
+    val progress by vm.testProgress.collectAsState()
     val connection by vm.connection.collectAsState()
     val activeId = connection.server?.id
     var query by remember { mutableStateOf("") }
     var sortByPing by remember { mutableStateOf(true) }
     var favoritesOnly by remember { mutableStateOf(false) }
-    var pendingDelete by remember { mutableStateOf<com.manfaz.vpn.data.model.ServerConfig?>(null) }
-    var pendingQr by remember { mutableStateOf<com.manfaz.vpn.data.model.ServerConfig?>(null) }
-    val prefs = remember { com.manfaz.vpn.data.Prefs(context) }
-    var freeUnlocked by remember { mutableStateOf(prefs.freeConfigsUnlocked) }
-    var secretTapCount by remember { mutableStateOf(0) }
-    var lastSecretTap by remember { mutableStateOf(0L) }
+    var pendingDelete by remember { mutableStateOf<ServerConfig?>(null) }
+    var pendingQr by remember { mutableStateOf<ServerConfig?>(null) }
 
+    // Searching only the display name was useless for subscription servers, whose names are
+    // often identical; address, group and protocol are what actually distinguish them.
     val filtered = servers
-        .filter { it.name.contains(query, ignoreCase = true) }
+        .filter { server ->
+            query.isBlank() || listOf(
+                server.name, server.address, server.group, server.protocol.label,
+            ).any { it.contains(query, ignoreCase = true) }
+        }
         .filter { !favoritesOnly || it.favorite }
-        .let { list -> if (sortByPing) list.sortedBy { it.pingMs ?: Int.MAX_VALUE } else list.sortedBy { it.name } }
+        .let { list ->
+            if (sortByPing) {
+                // Untested and unreachable servers sink to the bottom instead of pretending
+                // to be the fastest thing in the list.
+                list.sortedWith(compareBy({ it.pingMs == null }, { it.pingMs ?: Int.MAX_VALUE }))
+            } else {
+                list.sortedBy { it.name }
+            }
+        }
     val grouped = filtered.groupBy { it.group.ifBlank { "دستی" } }
     val subscriptionByName = subscriptions.associateBy { it.name }
 
-    Column(Modifier.fillMaxSize().padding(16.dp)) {
-        Text(
-            "سرورها",
-            fontWeight = FontWeight.Black,
-            fontSize = 22.sp,
-            color = MaterialTheme.colorScheme.onSurface,
-            modifier = Modifier.clickable(
-                interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
-                indication = null,
-            ) {
-                if (!freeUnlocked) {
-                    val now = android.os.SystemClock.elapsedRealtime()
-                    secretTapCount = if (now - lastSecretTap <= 1_200L) secretTapCount + 1 else 1
-                    lastSecretTap = now
-                    if (secretTapCount >= 7) {
-                        prefs.freeConfigsUnlocked = true
-                        freeUnlocked = true
-                        secretTapCount = 0
-                        android.widget.Toast.makeText(
-                            context, "بخش مخفی کانفیگ‌های رایگان فعال شد.", android.widget.Toast.LENGTH_SHORT
-                        ).show()
-                    }
-                }
-            },
-        )
-        Spacer(Modifier.size(12.dp))
-        OutlinedTextField(
-            value = query,
-            onValueChange = { query = it },
-            label = { Text("جستجوی سرور") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Row(
-            Modifier.fillMaxWidth().padding(vertical = 8.dp)
-                .horizontalScroll(androidx.compose.foundation.rememberScrollState()),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            TextButton(onClick = { sortByPing = !sortByPing }) {
-                Icon(Icons.Filled.Sort, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.size(6.dp))
-                Text(if (sortByPing) "مرتب‌سازی: تأخیر" else "مرتب‌سازی: نام")
-            }
-            TextButton(onClick = { vm.testAll() }, enabled = !testing) {
-                if (testing) {
-                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                } else {
-                    Icon(Icons.Filled.Speed, contentDescription = null, modifier = Modifier.size(18.dp))
-                }
-                Spacer(Modifier.size(6.dp))
-                Text(if (testing) "در حال تست واقعی…" else "تست تأخیر")
-            }
-            TextButton(onClick = { favoritesOnly = !favoritesOnly }) {
+    ManfazScreen(
+        title = "سرورها",
+        actions = {
+            IconButton(onClick = { favoritesOnly = !favoritesOnly }) {
                 Icon(
                     if (favoritesOnly) Icons.Filled.Star else Icons.Outlined.StarBorder,
-                    contentDescription = "فقط علاقه‌مندی‌ها", modifier = Modifier.size(18.dp),
+                    contentDescription = if (favoritesOnly) "نمایش همه" else "فقط علاقه‌مندی‌ها",
                     tint = if (favoritesOnly) MaterialTheme.colorScheme.primary else NeutralGray,
                 )
             }
-        }
-        Text("${filtered.size} سرور".toFarsiDigits(), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp,
-            modifier = Modifier.padding(bottom = 2.dp))
-
-        if (freeUnlocked) {
-            androidx.compose.material3.Button(
-                onClick = onOpenFree,
-                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-            ) {
-                Icon(Icons.Filled.Star, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.size(8.dp))
-                Text("کانفیگ‌های رایگان")
+            IconButton(onClick = onAddServer) {
+                Icon(Icons.Filled.Add, contentDescription = "افزودن سرور")
             }
-        }
-        Row(Modifier.padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            PingLegend(ConnectedGreen, "سریع")
-            PingLegend(BrandAmber, "متوسط")
-            PingLegend(FailedRed, "کند")
-            PingLegend(NeutralGray, "تست‌نشده")
-        }
-        Spacer(Modifier.size(6.dp))
-
-        if (filtered.isEmpty()) {
-            Spacer(Modifier.size(32.dp))
-            Text(
-                if (servers.isEmpty()) "هنوز سروری اضافه نکرده‌اید. از تب «افزودن» یک کانفیگ یا اشتراک اضافه کنید."
-                else "سروری با این جستجو پیدا نشد.",
-                color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp, modifier = Modifier.fillMaxWidth(),
+        },
+    ) { inner ->
+        Column(Modifier.fillMaxSize().padding(inner).padding(horizontal = 16.dp)) {
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                label = { Text("جستجو در نام، آدرس یا اشتراک") },
+                leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                trailingIcon = {
+                    if (query.isNotEmpty()) {
+                        IconButton(onClick = { query = "" }) {
+                            Icon(Icons.Filled.Close, contentDescription = "پاک کردن جستجو")
+                        }
+                    }
+                },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
             )
-        }
-
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            grouped.forEach { (group, groupServers) ->
-                subscriptionByName[group]?.let { sub ->
-                    item(key = "subscription-${sub.id}") { SubscriptionUsageStrip(sub) }
+            Row(
+                Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                    .horizontalScroll(androidx.compose.foundation.rememberScrollState()),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = { sortByPing = !sortByPing }) {
+                    Icon(Icons.Filled.Sort, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.size(6.dp))
+                    Text(if (sortByPing) "مرتب‌سازی: تأخیر" else "مرتب‌سازی: نام")
                 }
-                items(groupServers, key = { it.id }) { server ->
-                    val isActive = server.id == activeId
-                    CountryServerCard(
-                        server = server,
-                        isActive = isActive,
-                        onConnect = { vm.select(server); onConnect() },
-                        onLongClick = { menuFor = server },
-                        onFavorite = { vm.toggleFavorite(server.id) },
-                        onDelete = { pendingDelete = server },
-                    )
+                if (progress.running) {
+                    TextButton(onClick = vm::cancelTest) {
+                        Icon(Icons.Filled.Close, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.size(6.dp))
+                        Text("توقف تست")
+                    }
+                } else {
+                    TextButton(onClick = vm::testAll, enabled = servers.isNotEmpty()) {
+                        Icon(Icons.Filled.Speed, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.size(6.dp))
+                        Text("تست تأخیر")
+                    }
+                }
+            }
+
+            // An indeterminate spinner said nothing about a run that can touch hundreds of
+            // servers; a determinate bar with a phase label sets an honest expectation.
+            if (progress.running) {
+                Text(
+                    (if (progress.deepPhase) "تست دقیق سریع‌ترین‌ها" else "بررسی دسترس‌پذیری") +
+                        "  ${progress.done} از ${progress.total}".toFarsiDigits(),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
+                LinearProgressIndicator(
+                    progress = { progress.fraction },
+                    modifier = Modifier.fillMaxWidth().height(4.dp).padding(top = 4.dp),
+                )
+            }
+
+            Text(
+                "${filtered.size} سرور".toFarsiDigits(),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 13.sp,
+                modifier = Modifier.padding(top = 6.dp, bottom = 2.dp),
+            )
+            Row(Modifier.padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                PingLegend(ConnectedGreen, "سریع")
+                PingLegend(BrandAmber, "متوسط")
+                PingLegend(FailedRed, "کند")
+                PingLegend(NeutralGray, "تست‌نشده")
+            }
+            Spacer(Modifier.size(6.dp))
+
+            if (filtered.isEmpty()) {
+                EmptyState(hasAnyServer = servers.isNotEmpty(), onAddServer = onAddServer)
+            }
+
+            LazyColumn(
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                // Without bottom padding the last row hides behind the navigation bar.
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp),
+            ) {
+                grouped.forEach { (group, groupServers) ->
+                    subscriptionByName[group]?.let { sub ->
+                        item(key = "subscription-${sub.id}") { SubscriptionUsageStrip(sub) }
+                    }
+                    items(groupServers, key = { it.id }) { server ->
+                        CountryServerCard(
+                            server = server,
+                            isActive = server.id == activeId,
+                            onConnect = { vm.select(server); onConnect() },
+                            onLongClick = { menuFor = server },
+                            onFavorite = { vm.toggleFavorite(server.id) },
+                        )
+                    }
                 }
             }
         }
@@ -216,13 +230,21 @@ fun ServersScreen(
     if (menuServer != null) {
         AlertDialog(
             onDismissRequest = { menuFor = null },
-            title = { Text(menuServer.name, maxLines = 1) },
+            title = { Text(menuServer.displayLabel, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             text = {
                 Column {
-                    MenuItem("تست این سرور") { vm.testOne(menuServer); menuFor = null }
+                    Text(
+                        ltr("${menuServer.address}:${menuServer.port}"),
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 8.dp),
+                    )
+                    MenuItem("تست دقیق این سرور") { vm.testOne(menuServer); menuFor = null }
                     if (menuServer.rawUri.isNotBlank()) {
                         MenuItem("نمایش QR") { pendingQr = menuServer; menuFor = null }
-                        MenuItem("کپی لینک") { copyText(context, menuServer.rawUri); menuFor = null }
+                        MenuItem("کپی لینک") {
+                            copyText(context, menuServer.rawUri); menuFor = null
+                        }
                         MenuItem("اشتراک‌گذاری") { shareText(context, menuServer.rawUri); menuFor = null }
                     }
                     MenuItem("ویرایش") { onEditServer(menuServer.id); menuFor = null }
@@ -238,7 +260,7 @@ fun ServersScreen(
         AlertDialog(
             onDismissRequest = { pendingDelete = null },
             title = { Text("حذف سرور") },
-            text = { Text("«${toDelete.name}» حذف شود؟") },
+            text = { Text("«${toDelete.displayLabel}» حذف شود؟") },
             confirmButton = {
                 TextButton(onClick = { vm.removeServer(toDelete.id); pendingDelete = null }) {
                     Text("حذف", color = FailedRed)
@@ -255,13 +277,13 @@ fun ServersScreen(
         val qr = remember(qrServer.id) { com.manfaz.vpn.ui.QrGen.encode(qrServer.rawUri) }
         AlertDialog(
             onDismissRequest = { pendingQr = null },
-            title = { Text(qrServer.name, maxLines = 1) },
+            title = { Text(qrServer.displayLabel, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             text = {
                 if (qr != null) {
                     androidx.compose.foundation.Image(
                         bitmap = qr,
-                        contentDescription = "QR",
-                        modifier = Modifier.fillMaxWidth().size(260.dp),
+                        contentDescription = "کد QR کانفیگ",
+                        modifier = Modifier.fillMaxWidth().height(260.dp),
                     )
                 } else {
                     Text("امکان ساخت QR برای این سرور وجود ندارد.")
@@ -269,18 +291,38 @@ fun ServersScreen(
             },
             confirmButton = { TextButton(onClick = { pendingQr = null }) { Text("بستن") } },
             dismissButton = {
-                val ctx = androidx.compose.ui.platform.LocalContext.current
-                TextButton(onClick = {
-                    runCatching {
-                        ctx.startActivity(android.content.Intent.createChooser(
-                            android.content.Intent(android.content.Intent.ACTION_SEND)
-                                .setType("text/plain")
-                                .putExtra(android.content.Intent.EXTRA_TEXT, qrServer.rawUri),
-                            "اشتراک‌گذاری کانفیگ"))
-                    }
-                }) { Text("اشتراک‌گذاری") }
+                TextButton(onClick = { shareText(context, qrServer.rawUri) }) { Text("اشتراک‌گذاری") }
             },
         )
+    }
+}
+
+@Composable
+private fun EmptyState(hasAnyServer: Boolean, onAddServer: () -> Unit) {
+    Column(
+        Modifier.fillMaxWidth().padding(top = 32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(
+            if (!hasAnyServer) "هنوز سروری اضافه نکرده‌اید."
+            else "سروری با این جستجو پیدا نشد.",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 14.sp,
+        )
+        if (!hasAnyServer) {
+            Spacer(Modifier.size(6.dp))
+            Text(
+                "یک لینک کانفیگ یا آدرس اشتراک اضافه کنید تا شروع شود.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 13.sp,
+            )
+            Spacer(Modifier.size(16.dp))
+            Button(onClick = onAddServer) {
+                Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.size(8.dp))
+                Text("افزودن کانفیگ")
+            }
+        }
     }
 }
 
@@ -303,7 +345,7 @@ private fun SubscriptionUsageStrip(sub: Subscription) {
                 fontSize = 15.sp,
                 color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 1,
-                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                overflow = TextOverflow.Ellipsis,
             )
             Spacer(Modifier.height(7.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -348,9 +390,8 @@ private fun CountryServerCard(
     onConnect: () -> Unit,
     onLongClick: () -> Unit,
     onFavorite: () -> Unit,
-    onDelete: () -> Unit,
 ) {
-    val context = androidx.compose.ui.platform.LocalContext.current
+    val context = LocalContext.current
     val initial = remember(server.name, server.group, server.address) {
         Countries.detect("${server.name} ${server.group} ${server.address}")
     }
@@ -373,7 +414,13 @@ private fun CountryServerCard(
                 if (isActive) ConnectedGreen else warmBorder,
                 RoundedCornerShape(14.dp),
             )
-            .combinedClickable(onClick = onConnect, onLongClick = onLongClick),
+            .combinedClickable(
+                role = Role.Button,
+                onClickLabel = "اتصال به ${server.displayLabel}",
+                onLongClickLabel = "گزینه‌های بیشتر",
+                onClick = onConnect,
+                onLongClick = onLongClick,
+            ),
         shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(containerColor = cardColor),
         elevation = CardDefaults.cardElevation(defaultElevation = 3.dp),
@@ -391,68 +438,42 @@ private fun CountryServerCard(
                     .fillMaxWidth(0.62f)
                     .height(70.dp)
                     .absoluteOffset(x = (-72).dp, y = 3.dp)
-                    .alpha(if (dark) 0.22f else 0.22f),
+                    .alpha(0.22f),
             )
             Row(
-                Modifier.fillMaxSize().padding(horizontal = 10.dp, vertical = 5.dp),
+                Modifier.fillMaxSize().padding(start = 8.dp, end = 12.dp, top = 5.dp, bottom = 5.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Column(Modifier.weight(1f)) {
                     Text(
-                        server.name,
+                        server.displayLabel,
                         fontWeight = FontWeight.Black,
                         fontSize = 14.sp,
                         color = ink,
                         maxLines = 1,
-                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        overflow = TextOverflow.Ellipsis,
                     )
                     Text(country.faName, color = muted, fontSize = 10.sp)
                     Text(
-                        ltr(server.protocol.label + if (isActive) "  •  متصل" else ""),
+                        ltr(server.transportLabel + if (isActive) "  •  متصل" else ""),
                         color = if (isActive) ConnectedGreen else muted,
                         fontSize = 10.sp,
                         maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    val ping = server.pingMs
-                    Box(
-                        Modifier.width(54.dp).height(24.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            when {
-                                ping != null -> "$ping ms".toFarsiDigits()
-                                server.latencyTested -> "ناموفق"
-                                else -> "—"
-                            },
-                            color = when {
-                                ping == null && server.latencyTested -> FailedRed
-                                ping == null -> muted
-                                ping < 100 -> ConnectedGreen
-                                ping < 180 -> BrandAmber
-                                else -> FailedRed
-                            },
-                            fontWeight = FontWeight.Black,
-                            fontSize = if (ping == null && server.latencyTested) 9.sp else 11.sp,
-                        )
-                    }
-                    IconButton(onClick = onFavorite, modifier = Modifier.size(26.dp)) {
-                        Icon(
-                            if (server.favorite) Icons.Filled.Star else Icons.Outlined.StarBorder,
-                            contentDescription = "علاقه‌مندی",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(17.dp),
-                        )
-                    }
-                    IconButton(onClick = onDelete, modifier = Modifier.size(26.dp)) {
-                        Icon(
-                            Icons.Filled.Delete,
-                            contentDescription = "حذف",
-                            tint = FailedRed,
-                            modifier = Modifier.size(16.dp),
-                        )
-                    }
+                Box(Modifier.width(56.dp), contentAlignment = Alignment.Center) {
+                    PingBadge(server, muted)
+                }
+                // Delete used to sit here as a bare icon on an 80dp row, one mis-tap away from
+                // losing a config. It now lives behind the long-press menu with a confirmation.
+                IconButton(onClick = onFavorite, modifier = Modifier.size(48.dp)) {
+                    Icon(
+                        if (server.favorite) Icons.Filled.Star else Icons.Outlined.StarBorder,
+                        contentDescription = if (server.favorite) "حذف از علاقه‌مندی‌ها" else "افزودن به علاقه‌مندی‌ها",
+                        tint = if (server.favorite) MaterialTheme.colorScheme.primary else muted,
+                        modifier = Modifier.size(20.dp),
+                    )
                 }
             }
         }
@@ -460,7 +481,29 @@ private fun CountryServerCard(
 }
 
 @Composable
-private fun PingLegend(color: androidx.compose.ui.graphics.Color, label: String) {
+private fun PingBadge(server: ServerConfig, muted: Color) {
+    val ping = server.pingMs
+    Text(
+        when {
+            ping != null -> "$ping ms".toFarsiDigits()
+            server.latencyTested -> "ناموفق"
+            else -> "—"
+        },
+        color = when {
+            ping == null && server.latencyTested -> FailedRed
+            ping == null -> muted
+            ping < 100 -> ConnectedGreen
+            ping < 180 -> BrandAmber
+            else -> FailedRed
+        },
+        fontWeight = FontWeight.Black,
+        fontSize = if (ping == null && server.latencyTested) 10.sp else 12.sp,
+        maxLines = 1,
+    )
+}
+
+@Composable
+private fun PingLegend(color: Color, label: String) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         androidx.compose.foundation.Canvas(Modifier.size(8.dp)) { drawCircle(color) }
         Spacer(Modifier.size(4.dp))
@@ -469,8 +512,11 @@ private fun PingLegend(color: androidx.compose.ui.graphics.Color, label: String)
 }
 
 @Composable
-private fun MenuItem(label: String, color: androidx.compose.ui.graphics.Color? = null, onClick: () -> Unit) {
-    TextButton(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
+private fun MenuItem(label: String, color: Color? = null, onClick: () -> Unit) {
+    TextButton(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth().height(48.dp),
+    ) {
         Text(label, color = color ?: MaterialTheme.colorScheme.onSurface, modifier = Modifier.fillMaxWidth())
     }
 }
@@ -482,9 +528,12 @@ private fun copyText(context: android.content.Context, text: String) {
 
 private fun shareText(context: android.content.Context, text: String) {
     runCatching {
-        context.startActivity(android.content.Intent.createChooser(
-            android.content.Intent(android.content.Intent.ACTION_SEND)
-                .setType("text/plain").putExtra(android.content.Intent.EXTRA_TEXT, text),
-            "اشتراک‌گذاری کانفیگ").addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+        context.startActivity(
+            android.content.Intent.createChooser(
+                android.content.Intent(android.content.Intent.ACTION_SEND)
+                    .setType("text/plain").putExtra(android.content.Intent.EXTRA_TEXT, text),
+                "اشتراک‌گذاری کانفیگ",
+            ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
     }
 }

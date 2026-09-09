@@ -2,36 +2,47 @@ package com.manfaz.vpn.vpn
 
 import android.content.Intent
 import android.net.VpnService
+import android.os.SystemClock
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
-import com.manfaz.vpn.core.ServerCodec
 import com.manfaz.vpn.data.Prefs
 import com.manfaz.vpn.data.ServerRepository
 import com.manfaz.vpn.ui.MainActivity
 
 /**
- * C#11: Quick Settings tile — one-tap connect/disconnect to the last-used server.
+ * Quick Settings tile — one-tap connect/disconnect to the last-used server.
  * If VPN permission hasn't been granted yet, it opens the app so the user can grant it.
  */
 class ManfazTileService : TileService() {
 
     override fun onStartListening() {
         super.onStartListening()
-        val connected = ConnectionSnapshotStore.read(this)?.connected == true
+        val snapshot = ConnectionSnapshotStore.read(this)
+        val connected = snapshot?.connected == true
+        val blocked = snapshot?.blocked == true
         qsTile?.apply {
             state = if (connected) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
-            label = if (connected) "منفذ: متصل" else "منفذ: قطع"
+            label = when {
+                connected -> "منفذ: متصل"
+                // The tile is often the fastest way back online, so it must say what is wrong.
+                blocked -> "منفذ: اینترنت مسدود"
+                else -> "منفذ: قطع"
+            }
             updateTile()
         }
     }
 
     override fun onClick() {
         super.onClick()
-        val connected = ConnectionSnapshotStore.read(this)?.connected == true
-        if (connected) {
-            startService(
-                Intent(this, ManfazVpnService::class.java).setAction(ManfazVpnService.ACTION_STOP),
-            )
+        val snapshot = ConnectionSnapshotStore.read(this)
+        if (snapshot?.connected == true) {
+            sendServiceAction(ManfazVpnService.ACTION_STOP)
+            onStartListening()
+            return
+        }
+        if (snapshot?.blocked == true) {
+            // Releasing the kill switch is the only useful action while traffic is blocked.
+            sendServiceAction(ManfazVpnService.ACTION_RELEASE)
             onStartListening()
             return
         }
@@ -46,6 +57,14 @@ class ManfazTileService : TileService() {
         if (server == null) { openApp(); return }
         VpnController.connect(applicationContext, server)
         onStartListening()
+    }
+
+    private fun sendServiceAction(action: String) {
+        startService(
+            Intent(this, ManfazVpnService::class.java)
+                .setAction(action)
+                .putExtra(ManfazVpnService.EXTRA_EPOCH, SystemClock.elapsedRealtimeNanos()),
+        )
     }
 
     private fun openApp() {

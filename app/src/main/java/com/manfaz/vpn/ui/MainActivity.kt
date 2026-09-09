@@ -46,10 +46,13 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == RESULT_OK) {
-            // VPN consent was just granted: ask for notification permission once too,
-            // otherwise on Android 13+ the status/stop notification never appears.
+            // VPN consent was just granted: ask for notification permission too, otherwise on
+            // Android 13+ the status notification — and with it the kill switch's "release the
+            // internet" action — never appears.
             requestNotifPermissionIfNeeded()
             if (pendingSpecific) { pendingSpecific = false; vm.connectSelected() } else vm.toggleConnection()
+        } else {
+            pendingSpecific = false
         }
     }
 
@@ -109,7 +112,6 @@ class MainActivity : ComponentActivity() {
             delay(300)
             refreshVpnState()
         }
-        // Feature #4: offer to import a config found in the clipboard.
         vm.checkClipboard(this)
     }
 
@@ -137,6 +139,9 @@ class MainActivity : ComponentActivity() {
     private fun applyNetworkRules(caps: NetworkCapabilities) {
         val prefs = com.manfaz.vpn.data.Prefs(this)
         val status = vm.connection.value.status
+        // A kill-switch hold is a deliberate state; an automatic rule must not silently
+        // reconnect or release it behind the user's back.
+        if (status == ConnStatus.BLOCKED) return
         val active = status == ConnStatus.CONNECTED || status == ConnStatus.CONNECTING ||
             status == ConnStatus.SCANNING
         val action = when {
@@ -155,21 +160,25 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** Feature #5: launcher long-press shortcuts. */
+    /** Launcher long-press shortcuts. */
     private fun handleShortcutIntent(intent: Intent?) {
         when (intent?.getStringExtra(EXTRA_SHORTCUT)) {
             "connect", "fastest" -> { vm.pickFastest(); if (!isConnectedOrConnecting()) requestConnect() }
             "last" -> if (!isConnectedOrConnecting()) requestConnect()
             "disconnect" -> vm.disconnectNow()
         }
+        // Consume the extra so a configuration change does not replay the action.
+        intent?.removeExtra(EXTRA_SHORTCUT)
     }
 
-    /** C#12: auto-connect to the last server when the app opens, if enabled and not already up. */
+    /** Auto-connect to the last server when the app opens, if enabled and not already up. */
     private fun maybeAutoConnect() {
         val prefs = com.manfaz.vpn.data.Prefs(this)
         if (!prefs.autoConnectOnOpen) return
         val status = vm.connection.value.status
-        if (status == ConnStatus.CONNECTED || status == ConnStatus.CONNECTING) return
+        if (status == ConnStatus.CONNECTED || status == ConnStatus.CONNECTING ||
+            status == ConnStatus.BLOCKED
+        ) return
         if (vm.selected.value == null) return
         onToggleConnection()
     }
@@ -177,6 +186,8 @@ class MainActivity : ComponentActivity() {
     private fun handleImportIntent(intent: Intent?) {
         val data = intent?.data?.toString() ?: return
         if (data.isNotBlank()) vm.importText(data)
+        // Prevent a re-import on every recreation of the activity.
+        intent.data = null
     }
 
     private fun isConnectedOrConnecting(): Boolean {
@@ -186,14 +197,14 @@ class MainActivity : ComponentActivity() {
 
     /** Requests VPN consent the first time, then connects; disconnects if already up. */
     private fun onToggleConnection() {
+        val status = vm.connection.value.status
+        if (status == ConnStatus.BLOCKED) { vm.releaseKillSwitch(); return }
         if (isConnectedOrConnecting()) { vm.toggleConnection(); return }
         requestConnect()
     }
 
     /**
      * Consent-aware connect of the currently selected server (used by all connect entry points).
-     * The ongoing notification carries the disconnect action, so on Android 13+ ask for
-     * POST_NOTIFICATIONS here — the dialog only appears when no VPN-consent dialog is queued.
      */
     private fun requestConnect() {
         val prepare = VpnService.prepare(this)

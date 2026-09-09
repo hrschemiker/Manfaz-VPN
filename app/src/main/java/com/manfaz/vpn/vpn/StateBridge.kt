@@ -29,6 +29,7 @@ object StateBridge {
     const val EVENT_TRAFFIC = "traffic"
     const val EVENT_STOPPED = "stopped"
     const val EVENT_IPINFO = "ipinfo"
+    const val EVENT_BLOCKED = "blocked"
 
     fun sendConnected(ctx: Context, server: ServerConfig, ip: String, ping: Int, since: Long) = send(ctx) {
         putExtra(EXTRA_EVENT, EVENT_CONNECTED); putExtra(EXTRA_IP, ip); putExtra(EXTRA_PING, ping)
@@ -37,6 +38,13 @@ object StateBridge {
 
     fun sendFailed(ctx: Context, error: String) = send(ctx) {
         putExtra(EXTRA_EVENT, EVENT_FAILED); putExtra(EXTRA_ERROR, error)
+    }
+
+    /** The kill switch is holding the tunnel open with no proxy behind it. */
+    fun sendBlocked(ctx: Context, reason: String, server: ServerConfig?) = send(ctx) {
+        putExtra(EXTRA_EVENT, EVENT_BLOCKED)
+        putExtra(EXTRA_ERROR, reason)
+        server?.let { putExtra(EXTRA_SERVER, ServerCodec.toJson(it)) }
     }
 
     fun sendTraffic(ctx: Context, up: Long, down: Long) = send(ctx) {
@@ -65,6 +73,11 @@ object StateBridge {
                 since = intent.getLongExtra(EXTRA_SINCE, SystemClock.elapsedRealtime()),
             )
             EVENT_FAILED -> VpnController.onCoreFailed(intent.getStringExtra(EXTRA_ERROR) ?: "اتصال ناموفق")
+            EVENT_BLOCKED -> VpnController.onKillSwitchEngaged(
+                reason = intent.getStringExtra(EXTRA_ERROR) ?: "اتصال قطع شد",
+                server = intent.getStringExtra(EXTRA_SERVER)
+                    ?.let { runCatching { ServerCodec.fromJson(it) }.getOrNull() },
+            )
             EVENT_TRAFFIC -> VpnController.onTraffic(
                 intent.getLongExtra(EXTRA_UP, 0), intent.getLongExtra(EXTRA_DOWN, 0))
             EVENT_STOPPED -> VpnController.onServiceStopped()

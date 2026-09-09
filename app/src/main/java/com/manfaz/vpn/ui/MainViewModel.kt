@@ -3,68 +3,82 @@ package com.manfaz.vpn.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.manfaz.vpn.core.TunnelOptions
+import com.manfaz.vpn.core.XrayConfig
+import com.manfaz.vpn.core.XrayCore
+import com.manfaz.vpn.data.Prefs
 import com.manfaz.vpn.data.ServerRepository
 import com.manfaz.vpn.data.SubscriptionRepository
 import com.manfaz.vpn.data.model.ServerConfig
 import com.manfaz.vpn.data.model.Subscription
-import com.manfaz.vpn.core.XrayConfig
-import com.manfaz.vpn.core.XrayCore
-import com.manfaz.vpn.data.Prefs
 import com.manfaz.vpn.data.parser.ConfigParser
+import com.manfaz.vpn.net.Pinger
 import com.manfaz.vpn.vpn.ConnStatus
 import com.manfaz.vpn.vpn.VpnController
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
+    /** Outcome of an import attempt, so callers never have to pattern-match a message. */
+    data class ImportResult(val success: Boolean, val message: String)
+
+    /** Live progress of a latency run: `done` of `total`, plus the phase being executed. */
+    data class TestProgress(val done: Int = 0, val total: Int = 0, val deepPhase: Boolean = false) {
+        val running: Boolean get() = total > 0
+        val fraction: Float get() = if (total <= 0) 0f else done.toFloat() / total
+    }
+
     val connection = VpnController.state
     val servers = ServerRepository.servers
     val subscriptions = SubscriptionRepository.subs
-    val freeConfigs = com.manfaz.vpn.data.FreeConfigRepository.list
-
-    private val _freeTesting = MutableStateFlow(false)
-    val freeTesting: StateFlow<Boolean> = _freeTesting.asStateFlow()
-    private val _fetchingFree = MutableStateFlow(false)
-    val fetchingFree: StateFlow<Boolean> = _fetchingFree.asStateFlow()
 
     private val _selected = MutableStateFlow<ServerConfig?>(null)
     val selected: StateFlow<ServerConfig?> = _selected.asStateFlow()
 
-    private val _testing = MutableStateFlow(false)
-    val testing: StateFlow<Boolean> = _testing.asStateFlow()
+    private val _testProgress = MutableStateFlow(TestProgress())
+    val testProgress: StateFlow<TestProgress> = _testProgress.asStateFlow()
 
     private val _snack = MutableStateFlow<String?>(null)
     val snack: StateFlow<String?> = _snack.asStateFlow()
 
+    private val _updatingSubscriptions = MutableStateFlow(false)
+    val updatingSubscriptions: StateFlow<Boolean> = _updatingSubscriptions.asStateFlow()
+
     // Offer to auto-connect to the best server after a failed connection.
     private val _failoverPrompt = MutableStateFlow(false)
     val failoverPrompt: StateFlow<Boolean> = _failoverPrompt.asStateFlow()
-    private var lastFailedId: String? = null
     private val failedThisRun = mutableSetOf<String>()
     private var automaticFailovers = 0
 
+    private var testJob: Job? = null
     private val prefs = Prefs(app)
 
+    /**
+     * How many of the fastest reachable servers get a full end-to-end probe after the quick
+     * handshake sweep. Every deep probe starts an isolated native core, so the budget is what
+     * keeps a 300-server subscription from taking ten minutes to rank.
+     */
+    private val deepProbeBudget = 12
+
     init {
-        // C#13: restore the last-connected server, else the lowest-ping one.
+        // Restore the last-connected server, else the lowest-ping one.
         val last = servers.value.firstOrNull { it.id == prefs.lastServerId }
         _selected.value = last ?: servers.value.minByOrNull { it.pingMs ?: Int.MAX_VALUE }
 
-        // Watch connection state: failover offer + free-config fetch on connect.
         viewModelScope.launch {
             connection.collect { state ->
                 when (state.status) {
-                    com.manfaz.vpn.vpn.ConnStatus.FAILED -> {
-                        lastFailedId = state.server?.id
+                    ConnStatus.FAILED -> {
                         state.server?.id?.let(failedThisRun::add)
                         val alternative = bestAlternative()
                         if (prefs.autoFailover && automaticFailovers < prefs.failoverRetries && alternative != null) {
@@ -77,11 +91,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                             _failoverPrompt.value = true
                         }
                     }
-                    com.manfaz.vpn.vpn.ConnStatus.CONNECTED -> {
-                        automaticFailovers = 0; failedThisRun.clear(); maybeFetchFreeConfigs()
-                    }
-                    com.manfaz.vpn.vpn.ConnStatus.DISCONNECTED -> {
-                        automaticFailovers = 0; failedThisRun.clear()
+                    ConnStatus.CONNECTED, ConnStatus.DISCONNECTED -> {
+                        automaticFailovers = 0
+                        failedThisRun.clear()
                     }
                     else -> {}
                 }
@@ -99,49 +111,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Fetch free configs from Telegram (through the tunnel) every 6h, or on connect if due. */
-    private fun maybeFetchFreeConfigs() {
-        val sixHours = 6 * 3600_000L
-        if (_fetchingFree.value) return
-        if (System.currentTimeMillis() - prefs.lastFreeFetch < sixHours &&
-            com.manfaz.vpn.data.FreeConfigRepository.list.value.isNotEmpty()) return
-        viewModelScope.launch(Dispatchers.IO) {
-            _fetchingFree.value = true
-            val checkpoints = com.manfaz.vpn.net.FreeConfigFetcher.channels.associateWith {
-                prefs.freeChannelCheckpoint(it)
-            }
-            val result = runCatching {
-                com.manfaz.vpn.net.FreeConfigFetcher.fetchAll(XrayConfig.SOCKS_PORT, checkpoints)
-            }.getOrNull()
-            if (result != null) {
-                result.newestPostByChannel.forEach { (channel, postId) ->
-                    prefs.setFreeChannelCheckpoint(channel, postId)
-                }
-                val added = com.manfaz.vpn.data.FreeConfigRepository.merge(result.configs)
-                prefs.lastFreeFetch = System.currentTimeMillis()
-                if (added.isNotEmpty()) {
-                    freeSnack("${added.size} کانفیگ جدید پیدا شد؛ پس از قطع VPN تست می‌شوند.")
-                }
-            }
-            _fetchingFree.value = false
-        }
-    }
-
-    /** Manual refresh from the Free Configs screen. */
-    fun refreshFreeConfigs() {
-        if (connection.value.status != ConnStatus.CONNECTED) {
-            freeSnack("برای دریافت کانفیگ رایگان ابتدا متصل شوید."); return
-        }
-        prefs.lastFreeFetch = 0L
-        maybeFetchFreeConfigs()
-    }
-
     private fun bestAlternative(): ServerConfig? =
-        servers.value
-            .filter { it.id !in failedThisRun && !it.address.endsWith("example.com") }
-            .filter { it.pingMs != null }
-            .minByOrNull { it.pingMs ?: Int.MAX_VALUE }
-            ?: servers.value.firstOrNull { it.id !in failedThisRun && !it.address.endsWith("example.com") }
+        servers.value.filter { it.id !in failedThisRun }
+            .let { candidates ->
+                candidates.filter { it.pingMs != null }.minByOrNull { it.pingMs ?: Int.MAX_VALUE }
+                    ?: candidates.firstOrNull()
+            }
 
     fun dismissFailover() { _failoverPrompt.value = false }
 
@@ -155,11 +130,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun consumeSnack() { _snack.value = null }
     private fun snack(msg: String) { _snack.value = msg }
-    private fun freeSnack(msg: String) {
-        if (prefs.freeConfigsUnlocked) snack(msg)
-    }
 
-    // Feature #4: clipboard config detection
+    // ---- Clipboard config detection ----
     private val _clipboardPrompt = MutableStateFlow<String?>(null)
     val clipboardPrompt: StateFlow<String?> = _clipboardPrompt.asStateFlow()
     private var lastClipboardSeen: String = ""
@@ -175,7 +147,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun importClipboard() {
-        _clipboardPrompt.value?.let { snack(importText(it)) }
+        _clipboardPrompt.value?.let { snack(importText(it).message) }
         _clipboardPrompt.value = null
     }
 
@@ -191,18 +163,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         VpnController.toggle(getApplication(), target)
     }
 
-    /** Quick actions are deliberately restricted to the regular server repository. */
-    private fun quickPool(): List<ServerConfig> = servers.value
+    /** Kill-switch escape hatch, mirrored by the ongoing notification's action. */
+    fun releaseKillSwitch() {
+        VpnController.releaseKillSwitch(getApplication())
+        snack("اینترنت آزاد شد. محافظت VPN غیرفعال است.")
+    }
 
     /** Select the fastest server WITHOUT connecting (caller triggers the consent-aware connect). */
     fun pickFastest() {
-        val fastest = quickPool().minByOrNull { it.pingMs ?: Int.MAX_VALUE } ?: return
+        val fastest = servers.value.filter { it.pingMs != null }.minByOrNull { it.pingMs ?: Int.MAX_VALUE }
+            ?: servers.value.firstOrNull() ?: return
         _selected.value = fastest
         rememberLast(fastest)
     }
 
     fun pickRandom() {
-        val s = quickPool().randomOrNull() ?: return
+        val s = servers.value.randomOrNull() ?: return
         _selected.value = s
         rememberLast(s)
     }
@@ -224,118 +200,137 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         snack("سرور حذف شد.")
     }
 
-    // ---- Real end-to-end proxy latency, tested concurrently with bounded native work ----
-    fun testAll() = testServers(servers.value)
-    fun testOne(server: ServerConfig) = testServers(listOf(server))
-
-    private fun testServers(list: List<ServerConfig>) {
-        if (list.isEmpty()) return
-        val app = getApplication<Application>()
-        viewModelScope.launch {
-            _testing.value = true
-            try {
-                coroutineScope {
-                    // Each probe starts an isolated native Xray instance. A high fan-out can
-                    // starve DNS/CPU on mid-range phones and turn healthy servers into false
-                    // timeouts. Three workers is fast enough while matching production limits.
-                    val gate = Semaphore(3)
-                    val results = list.map { server ->
-                        async(Dispatchers.IO) {
-                            val latency = gate.withPermit {
-                                if (!XrayConfig.isSupportedByXray(server.protocol)) return@withPermit null
-                                XrayCore.measureDelayResilient(
-                                    app,
-                                    XrayConfig.build(
-                                        server = server,
-                                        remoteDns = prefs.remoteDns,
-                                        dnsBootstrap = prefs.dnsBootstrap,
-                                        dnsLeakProtection = prefs.dnsLeakProtection,
-                                        allowLan = prefs.allowLan,
-                                        ipv6Mode = prefs.ipv6Mode,
-                                    ),
-                                )
-                            }
-                            server.id to latency
-                        }
-                    }.awaitAll()
-                    ServerRepository.updatePings(results.toMap())
-                }
-                snack("تست واقعی سرورها کامل شد.")
-            } finally {
-                _testing.value = false
-            }
-        }
-    }
-
-    // ---- Free configs (Telegram) ----
-    fun testFreeAll() {
-        if (connection.value.status != ConnStatus.DISCONNECTED) {
-            freeSnack("برای تست واقعی کانفیگ‌های رایگان، ابتدا VPN را قطع کنید.")
-            return
-        }
-        val list = freeConfigs.value
-        if (list.isEmpty()) return
-        viewModelScope.launch {
-            _freeTesting.value = true
-            val removed = downloadTestAndFilter(list)
-            _freeTesting.value = false
-            freeSnack(if (removed > 0) "تست کامل شد؛ $removed کانفیگ بدون دانلود حذف شد."
-                  else "تست کانفیگ‌های رایگان کامل شد.")
-        }
-    }
+    // ---------------------------------------------------------------- latency
 
     /**
-     * Real download test (≥1 KB through the config). Configs that connect but don't actually
-     * download (upload-only/broken) fail and are REMOVED from the free list. Returns #removed.
+     * Two-phase latency run.
+     *
+     * Phase 1 opens a plain TCP handshake to every endpoint at high concurrency. It costs
+     * almost nothing, finishes in seconds even for a large subscription, and immediately
+     * separates reachable servers from dead ones.
+     *
+     * Phase 2 then spends the expensive end-to-end probe — a throwaway Xray instance that
+     * fetches a real URL through the config — only on the fastest handful. That is the number
+     * that actually predicts browsing quality, and restricting it to good candidates is what
+     * keeps the whole run fast on a mid-range phone.
      */
-    private suspend fun downloadTestAndFilter(list: List<ServerConfig>): Int {
+    fun testAll() = runLatencyTest(servers.value)
+
+    /** Full end-to-end probe for one server, from the row's context menu. */
+    fun testOne(server: ServerConfig) = runLatencyTest(listOf(server), deepOnly = true)
+
+    fun cancelTest() {
+        testJob?.cancel()
+        testJob = null
+        _testProgress.value = TestProgress()
+        snack("تست تأخیر متوقف شد.")
+    }
+
+    private fun runLatencyTest(list: List<ServerConfig>, deepOnly: Boolean = false) {
+        if (list.isEmpty() || testJob?.isActive == true) return
         val app = getApplication<Application>()
-        val dead = mutableListOf<String>()
-        for (server in list) {
-            if (connection.value.status != ConnStatus.DISCONNECTED) break
-            val ping = kotlinx.coroutines.withContext(Dispatchers.IO) {
-                if (XrayConfig.isSupportedByXray(server.protocol)) {
-                    XrayCore.measureDelay(app, XrayConfig.build(server), XrayCore.DOWNLOAD_TEST_URL)
-                } else null
+        val options = TunnelOptions.from(prefs)
+        testJob = viewModelScope.launch {
+            try {
+                val quick: Map<String, Int?> = if (deepOnly) {
+                    emptyMap()
+                } else {
+                    _testProgress.value = TestProgress(0, list.size, deepPhase = false)
+                    Pinger.tcpPingAll(list) { done, total ->
+                        _testProgress.value = TestProgress(done, total, deepPhase = false)
+                    }.also(ServerRepository::updatePings)
+                }
+
+                val deepCandidates = if (deepOnly) {
+                    list
+                } else {
+                    list.filter { quick[it.id] != null }
+                        .sortedBy { quick[it.id] ?: Int.MAX_VALUE }
+                        .take(deepProbeBudget)
+                }.filter { XrayConfig.isSupportedByXray(it.protocol) }
+
+                if (deepCandidates.isNotEmpty()) {
+                    _testProgress.value = TestProgress(0, deepCandidates.size, deepPhase = true)
+                    val deep = deepProbe(app, options, deepCandidates)
+                    ServerRepository.updatePings(deep)
+                }
+
+                val reachable = if (deepOnly) {
+                    list.count { ServerRepository.get(it.id)?.pingMs != null }
+                } else {
+                    quick.count { it.value != null }
+                }
+                snack(
+                    when {
+                        deepOnly -> "تست کامل شد."
+                        reachable == 0 -> "هیچ سروری پاسخ نداد؛ اتصال شبکه را بررسی کنید."
+                        else -> "$reachable سرور از ${list.size} سرور در دسترس است."
+                    },
+                )
+            } finally {
+                _testProgress.value = TestProgress()
+                testJob = null
             }
-            if (ping == null) dead.add(server.id)
-            else com.manfaz.vpn.data.FreeConfigRepository.updatePing(server.id, ping)
         }
-        com.manfaz.vpn.data.FreeConfigRepository.removeAll(dead)
-        return dead.size
     }
 
-    fun toggleFreeFavorite(id: String) = com.manfaz.vpn.data.FreeConfigRepository.toggleFavorite(id)
-    fun removeFree(id: String) {
-        if (selected.value?.id == id) _selected.value = null
-        com.manfaz.vpn.data.FreeConfigRepository.remove(id)
-    }
-    fun staleFreeCount() = com.manfaz.vpn.data.FreeConfigRepository.staleCount()
-    fun clearStaleFree() {
-        com.manfaz.vpn.data.FreeConfigRepository.clearStale()
-        freeSnack("کانفیگ‌های بدون پینگ حذف شدند.")
+    private suspend fun deepProbe(
+        app: Application,
+        options: TunnelOptions,
+        candidates: List<ServerConfig>,
+    ): Map<String, Int?> = coroutineScope {
+        // Each probe starts an isolated native Xray instance. A high fan-out starves DNS/CPU
+        // on mid-range phones and turns healthy servers into false timeouts.
+        val gate = Semaphore(3)
+        var done = 0
+        val lock = Any()
+        candidates.map { server ->
+            async(Dispatchers.IO) {
+                val latency = gate.withPermit {
+                    runCatching {
+                        XrayCore.measureDelayResilient(
+                            app,
+                            XrayConfig.build(server, options, forLatencyProbe = true),
+                        )
+                    }.getOrNull()
+                }
+                synchronized(lock) {
+                    _testProgress.value = TestProgress(++done, candidates.size, deepPhase = true)
+                }
+                // A config that fails the end-to-end probe is unusable even when its port
+                // answers, so the handshake number must not survive as a false promise.
+                server.id to latency
+            }
+        }.awaitAll().toMap()
     }
 
-    // ---- Import ----
-    fun importText(raw: String): String {
+    // ----------------------------------------------------------------- import
+
+    fun importText(raw: String): ImportResult {
         val trimmed = raw.trim()
+        if (trimmed.isBlank()) return ImportResult(false, "چیزی برای افزودن وارد نشده است.")
         // A lone http(s) URL with a path/query is a subscription link, not an HTTP-proxy config.
         if (isSubscriptionUrl(trimmed)) {
             val host = runCatching { android.net.Uri.parse(trimmed).host }.getOrNull() ?: "اشتراک"
             addSubscription(host, trimmed)
             markImported(trimmed)
-            return "در حال دریافت اشتراک…"
+            return ImportResult(true, "در حال دریافت اشتراک…")
         }
         val result = ConfigParser.parseMany(raw)
         ServerRepository.addAll(result.servers)
-        val msg = when {
-            result.servers.isEmpty() && result.errors.isEmpty() -> "هیچ کانفیگ معتبری پیدا نشد."
-            result.servers.isEmpty() -> "کانفیگ نامعتبر است. (${result.errors.size} خطا)"
-            result.errors.isEmpty() -> "${result.servers.size} سرور با موفقیت اضافه شد."
-            else -> "${result.servers.size} سرور اضافه شد، ${result.errors.size} مورد نامعتبر بود."
-        }
         if (result.servers.isNotEmpty()) markImported(trimmed)
-        return msg
+        return when {
+            result.servers.isEmpty() && result.errors.isEmpty() ->
+                ImportResult(false, "هیچ کانفیگ معتبری پیدا نشد.")
+            result.servers.isEmpty() ->
+                ImportResult(false, "کانفیگ نامعتبر است. (${result.errors.size} خطا)")
+            result.errors.isEmpty() ->
+                ImportResult(true, "${result.servers.size} سرور با موفقیت اضافه شد.")
+            else -> ImportResult(
+                true,
+                "${result.servers.size} سرور اضافه شد، ${result.errors.size} مورد نامعتبر بود.",
+            )
+        }
     }
 
     /** Prevent the clipboard suggestion from repeating immediately after a successful import. */
@@ -354,21 +349,35 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return hasPathOrQuery && uri.userInfo == null
     }
 
-    // ---- Subscriptions ----
+    // ---------------------------------------------------------- subscriptions
+
     fun addSubscription(name: String, url: String) {
         val cleanName = name.ifBlank { "اشتراک" }
         val sub = Subscription(name = cleanName, url = url.trim())
         SubscriptionRepository.add(sub)
         markImported(url.trim())
-        viewModelScope.launch { snack(SubscriptionRepository.update(sub.id)) }
+        viewModelScope.launch {
+            _updatingSubscriptions.value = true
+            try { snack(SubscriptionRepository.update(sub.id)) }
+            finally { _updatingSubscriptions.value = false }
+        }
     }
 
     fun updateSubscription(id: String) {
-        viewModelScope.launch { snack(SubscriptionRepository.update(id)) }
+        viewModelScope.launch {
+            _updatingSubscriptions.value = true
+            try { snack(SubscriptionRepository.update(id)) }
+            finally { _updatingSubscriptions.value = false }
+        }
     }
 
     fun updateAllSubscriptions() {
-        viewModelScope.launch { snack(SubscriptionRepository.updateAll()) }
+        if (_updatingSubscriptions.value) return
+        viewModelScope.launch {
+            _updatingSubscriptions.value = true
+            try { snack(SubscriptionRepository.updateAll()) }
+            finally { _updatingSubscriptions.value = false }
+        }
     }
 
     fun removeSubscription(id: String) = SubscriptionRepository.remove(id)

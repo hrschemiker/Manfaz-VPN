@@ -9,7 +9,7 @@ import java.net.URLDecoder
 
 /**
  * Parses proxy configuration URIs into [ServerConfig].
- * Supported: vless:// vmess:// trojan:// ss://
+ * Supported: vless:// vmess:// trojan:// ss:// socks:// http(s):// hysteria(2):// tuic://
  * Also handles multi-line input and Base64-encoded subscription blobs.
  */
 object ConfigParser {
@@ -42,7 +42,8 @@ object ConfigParser {
         for (raw in lines.map { it.trim() }.filter { it.isNotEmpty() }) {
             try {
                 val s = parseSingle(raw)
-                if (s != null) servers += s
+                if (s != null && s.address.isNotBlank() && s.port in 1..65535) servers += s
+                else if (s != null) errors += "آدرس یا پورت نامعتبر است: ${raw.take(24)}…"
             } catch (e: Exception) {
                 errors += "این لینک نامعتبر است: ${raw.take(24)}…"
             }
@@ -92,23 +93,25 @@ object ConfigParser {
         if (credsMayBeBase64 && userInfo.isNotBlank() && !userInfo.contains(":")) {
             userInfo = tryBase64(userInfo) ?: userInfo
         }
-        // For socks/http userinfo is user:pass; keep pass. For others it's an id/auth token.
-        val cred = if (userInfo.contains(":")) userInfo.substringAfter(":") else userInfo
-        val usesUuid = protocol == Protocol.TUIC
+        val user = userInfo.substringBefore(":")
+        val secret = if (userInfo.contains(":")) userInfo.substringAfter(":") else userInfo
+        // SOCKS/HTTP carry user:pass; TUIC carries uuid:password; the rest carry one token.
+        val carriesUser = protocol == Protocol.TUIC ||
+            protocol == Protocol.SOCKS || protocol == Protocol.HTTP
         return ServerConfig(
             name = name,
             protocol = protocol,
             address = u.host ?: "",
             port = if (u.port > 0) u.port else defaultPort,
-            uuid = if (usesUuid) userInfo.substringBefore(":") else "",
-            password = if (usesUuid) cred else cred,
+            uuid = if (carriesUser) user else "",
+            password = secret,
             network = u.getQueryParameter("type") ?: "tcp",
             security = u.getQueryParameter("security")
                 ?: if (protocol == Protocol.HYSTERIA2 || protocol == Protocol.TUIC) "tls" else "none",
             sni = u.getQueryParameter("sni") ?: u.getQueryParameter("peer") ?: "",
             host = u.getQueryParameter("host") ?: "",
             path = decode(u.getQueryParameter("path") ?: ""),
-            alpn = u.getQueryParameter("alpn") ?: "",
+            alpn = decode(u.getQueryParameter("alpn") ?: ""),
             fingerprint = u.getQueryParameter("fp") ?: "",
             rawUri = uri,
         )
@@ -133,6 +136,8 @@ object ConfigParser {
             sni = o.optString("sni", o.optString("host")),
             host = o.optString("host"),
             path = o.optString("path"),
+            serviceName = o.optString("path").takeIf { o.optString("net") == "grpc" } ?: "",
+            mode = o.optString("mode"),
             alpn = o.optString("alpn"),
             fingerprint = o.optString("fp"),
             rawUri = uri,
@@ -148,7 +153,7 @@ object ConfigParser {
             protocol = Protocol.VLESS,
             address = u.host ?: "",
             port = if (u.port > 0) u.port else 443,
-            uuid = u.userInfo ?: "",
+            uuid = decode(u.userInfo ?: ""),
             encryption = u.getQueryParameter("encryption") ?: "none",
             network = u.getQueryParameter("type") ?: "tcp",
             security = u.getQueryParameter("security") ?: "none",
@@ -158,10 +163,13 @@ object ConfigParser {
             serviceName = decode(u.getQueryParameter("serviceName") ?: ""),
             mode = u.getQueryParameter("mode") ?: "",
             flow = u.getQueryParameter("flow") ?: "",
-            alpn = u.getQueryParameter("alpn") ?: "",
+            alpn = decode(u.getQueryParameter("alpn") ?: ""),
             fingerprint = u.getQueryParameter("fp") ?: "",
             publicKey = u.getQueryParameter("pbk") ?: "",
             shortId = u.getQueryParameter("sid") ?: "",
+            spiderX = decode(u.getQueryParameter("spx") ?: ""),
+            mldsa65Verify = u.getQueryParameter("pqv") ?: "",
+            extra = decode(u.getQueryParameter("extra") ?: ""),
             rawUri = uri,
         )
     }
@@ -174,7 +182,7 @@ object ConfigParser {
             protocol = Protocol.TROJAN,
             address = u.host ?: "",
             port = if (u.port > 0) u.port else 443,
-            password = u.userInfo ?: "",
+            password = decode(u.userInfo ?: ""),
             network = u.getQueryParameter("type") ?: "tcp",
             security = u.getQueryParameter("security") ?: "tls",
             sni = u.getQueryParameter("sni") ?: "",
@@ -183,10 +191,13 @@ object ConfigParser {
             serviceName = decode(u.getQueryParameter("serviceName") ?: ""),
             mode = u.getQueryParameter("mode") ?: "",
             flow = u.getQueryParameter("flow") ?: "",
-            alpn = u.getQueryParameter("alpn") ?: "",
+            alpn = decode(u.getQueryParameter("alpn") ?: ""),
             fingerprint = u.getQueryParameter("fp") ?: "",
             publicKey = u.getQueryParameter("pbk") ?: "",
             shortId = u.getQueryParameter("sid") ?: "",
+            spiderX = decode(u.getQueryParameter("spx") ?: ""),
+            mldsa65Verify = u.getQueryParameter("pqv") ?: "",
+            extra = decode(u.getQueryParameter("extra") ?: ""),
             rawUri = uri,
         )
     }
@@ -205,16 +216,16 @@ object ConfigParser {
             val creds = tryBase64(userInfoPart) ?: decode(userInfoPart)
             method = creds.substringBefore(":")
             password = creds.substringAfter(":")
-            host = hostPart.substringBeforeLast(":")
+            host = hostPart.substringBeforeLast(":").trim('[', ']')
             port = hostPart.substringAfterLast(":").toIntOrNull() ?: 0
         } else {
             // ss://base64(method:password@host:port)
             val decoded = tryBase64(body.substringBefore("?")) ?: throw IllegalArgumentException("bad ss")
-            val credsPart = decoded.substringBefore("@")
-            val hostPart = decoded.substringAfter("@")
+            val credsPart = decoded.substringBeforeLast("@")
+            val hostPart = decoded.substringAfterLast("@")
             method = credsPart.substringBefore(":")
             password = credsPart.substringAfter(":")
-            host = hostPart.substringBeforeLast(":")
+            host = hostPart.substringBeforeLast(":").trim('[', ']')
             port = hostPart.substringAfterLast(":").toIntOrNull() ?: 0
         }
         return ServerConfig(
