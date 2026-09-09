@@ -30,10 +30,12 @@ jobs:
       KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
       RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
+      # No explicit ref: the workflow builds whatever it was started on. A tag push
+      # builds that tag; a manual run builds the branch you picked and creates the tag
+      # from it, so a release does not require the tag to exist beforehand.
       - uses: actions/checkout@v4
         with:
           lfs: true
-          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
