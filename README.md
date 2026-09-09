@@ -145,27 +145,22 @@ started by hand from the Actions tab, which creates the tag for you.
 
 #### One-time signing setup
 
-A release build must be signed with **the project's existing key**. A different key produces
-APKs that will not install over an existing installation, so the key never leaves the
-maintainer's machine and is supplied to CI as encrypted repository secrets.
+Release builds are signed in CI with the project's keystore, which is supplied as encrypted
+repository secrets and never committed — this repository is public, and a leaked signing key
+would let anyone publish a malicious build that installs silently over the real app.
 
-Run this once, on the machine that holds the keystore:
-
-```bash
-base64 -w0 path/to/your-keystore.jks > keystore.b64   # macOS: base64 -i path/to/your-keystore.jks -o keystore.b64
-```
-
-Then add four secrets under **Settings → Secrets and variables → Actions → New repository
-secret**:
+Add two secrets under **Settings → Secrets and variables → Actions → New repository secret**:
 
 | Secret | Value |
 |---|---|
-| `KEYSTORE_BASE64` | the entire contents of `keystore.b64` |
+| `KEYSTORE_BASE64` | the keystore file, base64-encoded (`base64 -w0 manfaz-release.jks`) |
 | `KEYSTORE_PASSWORD` | the keystore password |
-| `KEY_ALIAS` | the key alias |
-| `KEY_PASSWORD` | the key password |
 
-Delete `keystore.b64` afterwards. From then on every release is signed automatically.
+The key alias is `manfaz` and is set in the workflow, since on its own it protects nothing.
+
+Keep an offline backup of the keystore file and its password. Losing them means a future
+release can only be signed with a different key, and Android will not install that over an
+existing installation — every user would have to uninstall first.
 
 Without those secrets the workflow still publishes, but the APKs are unsigned, the files are
 named `-unsigned.apk`, and the release is marked as a pre-release explaining why — an

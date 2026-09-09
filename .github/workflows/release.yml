@@ -3,10 +3,11 @@ name: Release
 # Publishes the downloadable APKs. Push a tag such as `v2.0.0`, or run the workflow
 # manually and type the tag, and the per-ABI APKs are attached to a GitHub Release.
 #
-# Signing: set the four repository secrets below and the APKs are signed with the
-# project's own key, exactly like a local `assembleRelease`. Without them the workflow
-# still publishes, but the APKs are unsigned — Android will refuse to install those, so
-# the release is marked as a pre-release and says so.
+# Signing: set KEYSTORE_BASE64 and KEYSTORE_PASSWORD as repository secrets and the APKs
+# are signed with the project's key. The alias is fixed below because it is not a secret
+# on its own — the keystore file is. Without the secrets the workflow still publishes, but
+# the APKs are unsigned, Android refuses to install those, so the release is marked as a
+# pre-release and says why.
 on:
   push:
     tags:
@@ -29,6 +30,8 @@ jobs:
       # repository has no key configured, instead of failing the whole release.
       KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
       RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      # Not a secret: it only names an entry inside the (secret) keystore file.
+      KEY_ALIAS: manfaz
     steps:
       # No explicit ref: the workflow builds whatever it was started on. A tag push
       # builds that tag; a manual run builds the branch you picked and creates the tag
@@ -58,15 +61,13 @@ jobs:
         if: env.KEYSTORE_BASE64 != ''
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/manfaz.jks"
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/manfaz.p12"
           {
-            echo "manfaz.storeFile=$RUNNER_TEMP/manfaz.jks"
+            echo "manfaz.storeFile=$RUNNER_TEMP/manfaz.p12"
             echo "manfaz.storePassword=$KEYSTORE_PASSWORD"
             echo "manfaz.keyAlias=$KEY_ALIAS"
-            echo "manfaz.keyPassword=$KEY_PASSWORD"
+            echo "manfaz.keyPassword=$KEYSTORE_PASSWORD"
           } >> local.properties
 
       - name: Assemble release APKs
@@ -103,11 +104,8 @@ jobs:
           > **These APKs are unsigned and Android will refuse to install them.**
           >
           > No signing key is configured for this repository, so the build could not sign
-          > them. To publish installable APKs, add the app's keystore as the repository
-          > secrets `KEYSTORE_BASE64` (the `.jks` file, base64-encoded), `KEYSTORE_PASSWORD`,
-          > `KEY_ALIAS` and `KEY_PASSWORD`, then re-run the **Release** workflow for this tag.
-          > Using the project's existing key also keeps updates installable over an existing
-          > installation.
+          > them. Add the `KEYSTORE_BASE64` and `KEYSTORE_PASSWORD` repository secrets, then
+          > re-run the **Release** workflow for this tag.
 
           Most modern Android phones use **arm64-v8a**. Use **armeabi-v7a** only for older
           32-bit devices. `SHA256SUMS.txt` lists the checksum of every file.
