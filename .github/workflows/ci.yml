@@ -28,6 +28,11 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      # The wrapper's executable bit is preserved in git, but a fresh clone on a
+      # different filesystem can still land without it.
+      - name: Make the Gradle wrapper executable
+        run: chmod +x gradlew
+
       - name: Run unit tests
         run: ./gradlew --no-daemon testDebugUnitTest
 
