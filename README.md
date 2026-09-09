@@ -140,10 +140,36 @@ With valid credentials, `assembleRelease` produces signed per-ABI APKs. Without 
 ### Releases
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`, which builds the per-ABI APKs and
-attaches them, with SHA-256 checksums, to a GitHub Release. Set the `KEYSTORE_BASE64`,
-`KEYSTORE_PASSWORD`, `KEY_ALIAS` and `KEY_PASSWORD` repository secrets to have that build
-signed with the project key; without them the workflow publishes unsigned artifacts instead
-of failing.
+attaches them, with SHA-256 checksums, to a GitHub Release. The same workflow can also be
+started by hand from the Actions tab, which creates the tag for you.
+
+#### One-time signing setup
+
+A release build must be signed with **the project's existing key**. A different key produces
+APKs that will not install over an existing installation, so the key never leaves the
+maintainer's machine and is supplied to CI as encrypted repository secrets.
+
+Run this once, on the machine that holds the keystore:
+
+```bash
+base64 -w0 path/to/your-keystore.jks > keystore.b64   # macOS: base64 -i path/to/your-keystore.jks -o keystore.b64
+```
+
+Then add four secrets under **Settings → Secrets and variables → Actions → New repository
+secret**:
+
+| Secret | Value |
+|---|---|
+| `KEYSTORE_BASE64` | the entire contents of `keystore.b64` |
+| `KEYSTORE_PASSWORD` | the keystore password |
+| `KEY_ALIAS` | the key alias |
+| `KEY_PASSWORD` | the key password |
+
+Delete `keystore.b64` afterwards. From then on every release is signed automatically.
+
+Without those secrets the workflow still publishes, but the APKs are unsigned, the files are
+named `-unsigned.apk`, and the release is marked as a pre-release explaining why — an
+unsigned APK is one Android refuses to install.
 
 ## Security and privacy
 
